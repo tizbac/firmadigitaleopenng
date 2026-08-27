@@ -45,6 +45,7 @@ qt_add_executable(firmadigitaleopen
     src/main.cpp
     src/mainwindow.cpp
     src/pdfpreview.cpp
+    src/p11worker.cpp
     resources/resources.qrc
 )
 
@@ -95,6 +96,7 @@ qt_add_executable(tst_guisign
     tests/tst_guisign.cpp
     src/mainwindow.cpp
     src/pdfpreview.cpp
+    src/p11worker.cpp
 )
 target_link_libraries(tst_guisign PRIVATE Qt6::Widgets PopplerQt6 fdo_core)
 target_compile_definitions(tst_guisign PRIVATE

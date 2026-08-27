@@ -1,8 +1,11 @@
 #pragma once
 
+#include <QByteArray>
 #include <QMainWindow>
+#include <QString>
 #include <vector>
 
+#include "p11worker.h"
 #include "pkcs11.h"
 
 class QTabWidget;
@@ -14,6 +17,9 @@ class QLabel;
 class QPushButton;
 class QScrollArea;
 class QPlainTextEdit;
+class QThread;
+class QTimer;
+class QProgressDialog;
 
 namespace fdo {
 class PdfPreview;
@@ -47,16 +53,38 @@ private slots:
     void browseVerifyTsl();
     void verifyP7m();
     void saveOriginalFile();
+    void onSlotsEnumerated(int gen, const std::vector<fdo::Pkcs11Slot> &found,
+                           const QString &error);
+    void onSignFinished(int kind, bool ok, const QString &error,
+                        const QByteArray &pdfOut);
+    void issuePendingSlotQueries();
+
+signals:
+    void p11EnumerateRequested(const QString &libPath, int gen);
+    void p11SignRequested(const Pkcs11Worker::SignParams &params);
 
 private:
+    // One pending slot-enumeration request (result applied to box/store).
+    struct PendingSlots {
+        int gen = 0;
+        QString lib;
+        QComboBox *box = nullptr;
+        std::vector<fdo::Pkcs11Slot> *store = nullptr;
+    };
+
     QWidget *buildPadesTab();
     QWidget *buildP7mTab();
     QWidget *buildVerifyTab();
     void detectSlots(QLineEdit *libEdit, QComboBox *slotBox,
                      std::vector<fdo::Pkcs11Slot> &store);
+    void applySlotResults(QComboBox *box, std::vector<fdo::Pkcs11Slot> &store,
+                          const std::vector<fdo::Pkcs11Slot> &found,
+                          const std::string &err);
     fdo::Pkcs11Slot selectedSlot(QComboBox *box,
                                  const std::vector<fdo::Pkcs11Slot> &store) const;
     QString defaultP11Lib() const;
+    void showProgress(const QString &text);
+    void hideProgress();
 
     QTabWidget *m_tabs = nullptr;
 
@@ -95,4 +123,13 @@ private:
 
     std::vector<fdo::Pkcs11Slot> m_p11Slots;
     std::vector<fdo::Pkcs11Slot> m_p7mSlots;
+
+    // PKCS#11 runs on a worker thread so slow real-token calls never block
+    // the UI; the modal progress dialog is shown while a sign is in flight.
+    QThread *m_p11Thread = nullptr;
+    Pkcs11Worker *m_p11Worker = nullptr;
+    QTimer *m_slotDebounce = nullptr;
+    QProgressDialog *m_progress = nullptr;
+    int m_slotGen = 0;
+    std::vector<PendingSlots> m_pendingSlots;
 };

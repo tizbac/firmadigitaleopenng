@@ -22,6 +22,13 @@
 #include <QFile>
 #include <QApplication>
 #include <QFrame>
+#include <QThread>
+#include <QTimer>
+#include <QProgressDialog>
+#include <QMetaType>
+
+#include <algorithm>
+#include <map>
 
 #include "tslparser.h"
 
@@ -67,6 +74,33 @@ MainWindow::MainWindow(QWidget *parent)
     m_tabs->addTab(buildVerifyTab(), tr("Verifica Firma (P7M)"));
     setCentralWidget(m_tabs);
 
+    // PKCS#11 worker: slot enumeration and signing run on a dedicated
+    // thread because real tokens take seconds per C_* call (PIN entry on
+    // the token display, USB round trips) and must not freeze the UI.
+    qRegisterMetaType<fdo::Pkcs11Slot>();
+    qRegisterMetaType<std::vector<fdo::Pkcs11Slot>>();
+    qRegisterMetaType<Pkcs11Worker::SignParams>();
+
+    m_p11Thread = new QThread(this);
+    m_p11Worker = new Pkcs11Worker;
+    m_p11Worker->moveToThread(m_p11Thread);
+    connect(m_p11Thread, &QThread::finished, m_p11Worker, &QObject::deleteLater);
+    m_p11Thread->start();
+    connect(this, &MainWindow::p11EnumerateRequested, m_p11Worker,
+            &Pkcs11Worker::enumerate);
+    connect(this, &MainWindow::p11SignRequested, m_p11Worker,
+            &Pkcs11Worker::sign);
+    connect(m_p11Worker, &Pkcs11Worker::enumerated, this,
+            &MainWindow::onSlotsEnumerated);
+    connect(m_p11Worker, &Pkcs11Worker::signFinished, this,
+            &MainWindow::onSignFinished);
+
+    m_slotDebounce = new QTimer(this);
+    m_slotDebounce->setSingleShot(true);
+    m_slotDebounce->setInterval(300);
+    connect(m_slotDebounce, &QTimer::timeout, this,
+            &MainWindow::issuePendingSlotQueries);
+
     // Default PKCS#11 module + initial slot detection.
     const QString defLib = defaultP11Lib();
     m_p11Lib->setText(defLib);
@@ -79,7 +113,13 @@ MainWindow::MainWindow(QWidget *parent)
     detectSlots(m_p7mLib, m_p7mSlot, m_p7mSlots);
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow()
+{
+    if (m_p11Thread) {
+        m_p11Thread->quit();
+        m_p11Thread->wait();
+    }
+}
 
 QWidget *MainWindow::buildPadesTab()
 {
@@ -334,44 +374,103 @@ QString MainWindow::defaultP11Lib() const
 void MainWindow::detectSlots(QLineEdit *libEdit, QComboBox *slotBox,
                              std::vector<fdo::Pkcs11Slot> &store)
 {
-    const bool hadFocus = slotBox->hasFocus();
+    const QString lib = libEdit->text().trimmed();
     slotBox->blockSignals(true);
     slotBox->clear();
     store.clear();
+    slotBox->addItem(lib.isEmpty() ? tr("(nessun modulo)")
+                                   : tr("rilevamento token in corso..."));
+    slotBox->blockSignals(false);
 
-    const QString lib = libEdit->text().trimmed();
-    if (lib.isEmpty()) {
-        slotBox->addItem(tr("(nessun modulo)"));
-        slotBox->blockSignals(false);
+    if (lib.isEmpty())
         return;
-    }
 
-    std::string err;
-    const auto foundSlots = fdo::Pkcs11::enumerateSlots(lib.toStdString(), &err);
-    for (const auto &s : foundSlots) {
+    // Drop any in-flight query for this combo, then ask the worker thread
+    // (debounced, so typing a path does not flood the token) to enumerate.
+    for (auto it = m_pendingSlots.begin(); it != m_pendingSlots.end();)
+        it = (it->box == slotBox) ? m_pendingSlots.erase(it) : std::next(it);
+    m_pendingSlots.push_back({ ++m_slotGen, lib, slotBox, &store });
+    m_slotDebounce->start();
+}
+
+void MainWindow::applySlotResults(QComboBox *box, std::vector<fdo::Pkcs11Slot> &store,
+                                  const std::vector<fdo::Pkcs11Slot> &found,
+                                  const std::string &err)
+{
+    box->blockSignals(true);
+    box->clear();
+    store.clear();
+    for (const auto &s : found) {
         QString label = s.tokenLabel.empty()
                             ? tr("slot 0x%1").arg(QString::number(s.index, 16))
                             : QString::fromStdString(s.tokenLabel).trimmed();
         if (!s.certSubject.empty())
             label += " - " + QString::fromStdString(s.certSubject);
-        slotBox->addItem(label);
+        box->addItem(label);
         store.push_back(s);
     }
 
-    if (foundSlots.empty()) {
-        slotBox->addItem(tr("nessun token") +
-                         (err.empty() ? QString()
-                                      : " (" + QString::fromStdString(err) + ")"));
+    if (found.empty()) {
+        box->addItem(tr("nessun token") +
+                     (err.empty() ? QString()
+                                  : " (" + QString::fromStdString(err) + ")"));
     } else {
-        for (size_t i = 0; i < foundSlots.size(); ++i)
-            if (foundSlots[i].hasCert) {
-                slotBox->setCurrentIndex(int(i));
+        for (size_t i = 0; i < found.size(); ++i)
+            if (found[i].hasCert) {
+                box->setCurrentIndex(int(i));
                 break;
             }
     }
+    box->blockSignals(false);
+}
 
-    slotBox->blockSignals(false);
-    (void)hadFocus;
+void MainWindow::issuePendingSlotQueries()
+{
+    // One worker request per distinct module; combos sharing the same lib
+    // piggyback on the same result.
+    std::map<QString, int> issued;
+    for (auto &q : m_pendingSlots) {
+        auto it = issued.find(q.lib);
+        if (it != issued.end()) {
+            q.gen = it->second;
+            continue;
+        }
+        issued.emplace(q.lib, q.gen);
+        emit p11EnumerateRequested(q.lib, q.gen);
+    }
+}
+
+void MainWindow::onSlotsEnumerated(int gen, const std::vector<fdo::Pkcs11Slot> &found,
+                                   const QString &error)
+{
+    auto it = m_pendingSlots.begin();
+    while (it != m_pendingSlots.end()) {
+        if (it->gen == gen) {
+            applySlotResults(it->box, *it->store, found, error.toStdString());
+            it = m_pendingSlots.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void MainWindow::showProgress(const QString &text)
+{
+    if (m_progress)
+        return;
+    m_progress = new QProgressDialog(text, nullptr, 0, 0, this);
+    m_progress->setWindowModality(Qt::ApplicationModal);
+    m_progress->setMinimumDuration(0);
+    m_progress->show();
+}
+
+void MainWindow::hideProgress()
+{
+    if (!m_progress)
+        return;
+    m_progress->hide();
+    m_progress->deleteLater();
+    m_progress = nullptr;
 }
 
 fdo::Pkcs11Slot MainWindow::selectedSlot(QComboBox *box,
@@ -473,71 +572,27 @@ void MainWindow::signPdf()
         return;
     }
 
-    fdo::Pkcs11 p11;
-    if (!p11.loadLibrary(lib.toStdString(), &err)) {
-        QMessageBox::critical(this, tr("Errore modulo"),
-                              QString::fromStdString(err));
-        return;
+    Pkcs11Worker::SignParams p;
+    p.kind = Pkcs11Worker::SignParams::Pades;
+    p.libPath = lib;
+    p.slotIndex = selectedSlot(m_p11Slot, m_p11Slots).index;
+    p.pin = pin;
+    p.pdfData = QByteArray(reinterpret_cast<const char *>(pdfBytes.data()),
+                           static_cast<int>(pdfBytes.size()));
+    p.page = m_page->value();
+    p.visible = m_visible->isChecked() && m_preview->hasBox();
+    p.visibleText = m_visibleText->text().toStdString();
+    if (p.visible) {
+        p.boxX1 = m_preview->boxX1();
+        p.boxY1 = m_preview->boxY1();
+        p.boxX2 = m_preview->boxX2();
+        p.boxY2 = m_preview->boxY2();
     }
-    const fdo::Pkcs11Slot slot = selectedSlot(m_p11Slot, m_p11Slots);
-    if (!p11.login(slot.index, pin.toStdString(), &err)) {
-        QMessageBox::critical(this, tr("Login fallito"),
-                              QString::fromStdString(err));
-        return;
-    }
-    if (!p11.findSigner(&err)) {
-        QMessageBox::critical(this, tr("Firmatario non trovato"),
-                              QString::fromStdString(err));
-        return;
-    }
-    const auto *signer = p11.signer();
-    if (!signer || signer->certDer.empty()) {
-        QMessageBox::critical(this, tr("Errore"), tr("Nessun certificato trovato."));
-        return;
-    }
-    auto cert = fdo::X509Cert::fromDer(signer->certDer);
-    if (!cert) {
-        QMessageBox::critical(this, tr("Errore"),
-                              tr("Certificato non valido sul token."));
-        return;
-    }
-
-    fdo::PadesConfig cfg;
-    cfg.pdfBytes = pdfBytes;
-    cfg.onPage = m_page->value();
-    cfg.visible = m_visible->isChecked() && m_preview->hasBox();
-    cfg.visibleText = m_visibleText->text().toStdString();
-    if (cfg.visible) {
-        cfg.boxX1 = m_preview->boxX1();
-        cfg.boxY1 = m_preview->boxY1();
-        cfg.boxX2 = m_preview->boxX2();
-        cfg.boxY2 = m_preview->boxY2();
-    }
-    cfg.signerCert = *cert;
-
-    const auto signFn = [&p11](const std::vector<unsigned char> &data,
-                               std::vector<unsigned char> &sig, std::string &e) {
-        return p11.sign(data, sig, &e);
-    };
 
     m_pdfStatus->setText(tr("Firma in corso..."));
-    QApplication::setOverrideCursor(Qt::WaitCursor);
-    const fdo::PadesResult res = fdo::Pades::sign(cfg, signFn);
-    QApplication::restoreOverrideCursor();
-
-    if (!res.ok) {
-        m_pdfStatus->setText(tr("Firma fallita."));
-        QMessageBox::critical(this, tr("Firma fallita"),
-                              QString::fromStdString(res.error));
-        return;
-    }
-    if (!writeFileBytes(out, res.pdfBytes, err)) {
-        QMessageBox::critical(this, tr("Errore"), QString::fromStdString(err));
-        return;
-    }
-    m_pdfStatus->setText(tr("PDF firmato: %1").arg(out));
-    QMessageBox::information(this, tr("Completato"),
-                             tr("PDF firmato e salvato in:\n%1").arg(out));
+    showProgress(tr("Firma in corso: attendi il token (inserisci il PIN "
+                    "sul token se richiesto)..."));
+    emit p11SignRequested(p);
 }
 
 void MainWindow::signFile()
@@ -563,51 +618,53 @@ void MainWindow::signFile()
         return;
     }
 
-    fdo::Pkcs11 p11;
-    std::string err;
-    if (!p11.loadLibrary(lib.toStdString(), &err)) {
-        QMessageBox::critical(this, tr("Errore modulo"),
-                              QString::fromStdString(err));
-        return;
-    }
-    const fdo::Pkcs11Slot slot = selectedSlot(m_p7mSlot, m_p7mSlots);
-    if (!p11.login(slot.index, pin.toStdString(), &err)) {
-        QMessageBox::critical(this, tr("Login fallito"),
-                              QString::fromStdString(err));
-        return;
-    }
-    if (!p11.findSigner(&err)) {
-        QMessageBox::critical(this, tr("Firmatario non trovato"),
-                              QString::fromStdString(err));
-        return;
-    }
-    const auto *signer = p11.signer();
-    if (!signer || signer->certDer.empty()) {
-        QMessageBox::critical(this, tr("Errore"), tr("Nessun certificato trovato."));
-        return;
-    }
-
-    const auto signFn = [&p11](const std::vector<unsigned char> &data,
-                               std::vector<unsigned char> &sig, std::string &e) {
-        return p11.sign(data, sig, &e);
-    };
+    Pkcs11Worker::SignParams p;
+    p.kind = Pkcs11Worker::SignParams::P7M;
+    p.libPath = lib;
+    p.slotIndex = selectedSlot(m_p7mSlot, m_p7mSlots).index;
+    p.pin = pin;
+    p.p7mIn = in;
+    p.p7mOut = out;
 
     m_fileStatus->setText(tr("Firma in corso..."));
-    QApplication::setOverrideCursor(Qt::WaitCursor);
-    const bool ok =
-        fdo::P7M::signFile(in.toStdString(), out.toStdString(), signer->certDer,
-                           signFn, &err);
-    QApplication::restoreOverrideCursor();
+    showProgress(tr("Firma in corso: attendi il token (inserisci il PIN "
+                    "sul token se richiesto)..."));
+    emit p11SignRequested(p);
+}
 
-    if (!ok) {
-        m_fileStatus->setText(tr("Firma fallita."));
-        QMessageBox::critical(this, tr("Firma fallita"),
-                              QString::fromStdString(err));
-        return;
+void MainWindow::onSignFinished(int kind, bool ok, const QString &error,
+                                const QByteArray &pdfOut)
+{
+    hideProgress();
+
+    if (kind == Pkcs11Worker::SignParams::Pades) {
+        const QString out = m_pdfOutput->text().trimmed();
+        if (!ok) {
+            m_pdfStatus->setText(tr("Firma fallita."));
+            QMessageBox::critical(this, tr("Firma fallita"), error);
+            return;
+        }
+        std::vector<unsigned char> pdfBytes(pdfOut.constData(),
+                                            pdfOut.constData() + pdfOut.size());
+        std::string err;
+        if (!writeFileBytes(out, pdfBytes, err)) {
+            QMessageBox::critical(this, tr("Errore"), QString::fromStdString(err));
+            return;
+        }
+        m_pdfStatus->setText(tr("PDF firmato: %1").arg(out));
+        QMessageBox::information(this, tr("Completato"),
+                                 tr("PDF firmato e salvato in:\n%1").arg(out));
+    } else {
+        const QString out = m_fileOutput->text().trimmed();
+        if (!ok) {
+            m_fileStatus->setText(tr("Firma fallita."));
+            QMessageBox::critical(this, tr("Firma fallita"), error);
+            return;
+        }
+        m_fileStatus->setText(tr("File firmato: %1").arg(out));
+        QMessageBox::information(this, tr("Completato"),
+                                 tr("File firmato e salvato in:\n%1").arg(out));
     }
-    m_fileStatus->setText(tr("File firmato: %1").arg(out));
-    QMessageBox::information(this, tr("Completato"),
-                             tr("File firmato e salvato in:\n%1").arg(out));
 }
 
 void MainWindow::browseVerifyP7m()

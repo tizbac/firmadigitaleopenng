@@ -1,0 +1,36 @@
+# AGENTS.md
+
+C++17/Qt6 digital-signature tool: PAdES-BES PDF signing, P7M (CMS detached) sign/verify, TSL verification, PKCS#11 (Bit4id) token access. `fdo_core` is a Qt-free static crypto library; the Qt GUI (`main.cpp`, `mainwindow.*`, `pdfpreview.*`) sits on top. Everything lives in namespace `fdo`. README.md has full details.
+
+## Build & test
+
+```
+cmake -S . -B build && cmake --build build -j
+ctest --test-dir build --output-on-failure          # all suites
+ctest --test-dir build -R pades --output-on-failure  # single suite
+```
+
+- Requires Qt6 >= 6.5 (Widgets/Network/Sql), OpenSSL 3, libxml2, and `libpoppler-qt6-dev`. Poppler ships no CMake config; CMakeLists.txt builds an imported target from the raw header/library and fails hard without it.
+- The checked-in `build/` and `build-plain/` directories are stale: they were configured from a previous checkout path (`/home/tiziano/FirmaDigitaleOpen/firmadigitaleopencpp`), so their ctest entries point at old binaries. Configure a fresh build dir instead of trusting them.
+- No lint/format/typecheck tooling is configured in this repo.
+
+## Test suites and gotchas
+
+- Suites: `c14n`, `tslverifier`, `p7mverify`, `pades` (pure, fast); `pkcs11`, `guisign` (need a PKCS#11 module, resolved automatically — see below).
+- **`tests/data/test.pdf` is missing from the repo**, but `pades` and `guisign` hard-fail without it (`tst_pades` exits 2). Any small valid PDF works; place it at `tests/data/test.pdf`. The PAdES parser only supports classic xref tables, not xref streams. Test binaries take the data dir as `argv[1]`, so they can also be pointed at any dir containing a `test.pdf` (e.g. `./build/tst_pades /path/to/dir`).
+- `pkcs11` and `guisign` run via `tests/run_pkcs11.sh`, which resolves a module in order: (1) `FDO_PKCS11_LIB` + optional `FDO_PKCS11_PIN` env vars (physical token), (2) SoftHSM2 emulator — auto-initialises a throwaway token in a temp dir and exercises full login→sign→verify, (3) Bit4id lib next to the repo for enumeration-only, (4) skip with PASS. A missing token is never a failure; a module-load/ABI error or a signature-verification mismatch is.
+- To run the GUI test headless with a physical token: `FDO_PKCS11_LIB=../libbit4xpki.so FDO_PKCS11_PIN=1234 ctest --test-dir build -R guisign --output-on-failure`.
+- Optional real-world P7M check: configure with `-DTESTP7M=/path/to/file.p7m` (adds the AgID TSL verification part to `p7mverify` and the verify-tab part to `guisign`). **Never commit `.p7m` files** — they contain signed content (`.gitignore` already excludes `*.p7m`).
+- Run a test binary directly: `./build/tst_pkcs11 <module.so> [pin]`.
+
+## PKCS#11 quirks (do not "fix")
+
+- Signer key/cert are located by `CKA_ID "DS3"`; SoftHSM doesn't expose `CKA_ID` for reading, so the layer transparently falls back to a class-only search (correct for single-key tokens).
+- `sign()` in `src/pkcs11.cpp` tries both `CKM_SHA256_RSA_PKCS` (0x1051) and 0x40: this system's p11-kit/SoftHSM build encodes the mechanism as 0x40.
+- SoftHSM's `C_FindObjects` requires a non-NULL `pObjectCount`; SoftHSM reports every virtual slot as `tokenPresent`, so real tokens are distinguished by having a certificate.
+- For manual SoftHSM work, `SOFTHSM2_CONF` must be exported for every PKCS#11 client process (setup steps in README.md).
+
+## Conventions
+
+- Core error strings are in Italian (e.g. `"xref non trovata (xref stream non supportato)"` in `pades.cpp`); tests and README rely on them — keep them.
+- Tests are plain executables with a `CHECK` macro, no framework; they print `OK`/`FAIL` lines and return non-zero on failure.
