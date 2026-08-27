@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="NotoSans-Regular.ttf">NotoSans-Regular.ttf</file>
+    </qresource>
+</RCC>
