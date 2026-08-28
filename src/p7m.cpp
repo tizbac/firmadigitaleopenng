@@ -449,72 +449,99 @@ bool parseCms(const std::vector<unsigned char> &in, ParsedCms &out, std::string 
                 out.msgDigestAttr.assign(t.data, t.data + t.len);
         }
         if (findSignedAttr(buf, n, attrsSetOff, attrsSetLen, oidEss, v, vl)) {
-            // The first element of the values SET is the ESSCertIDv2 SEQUENCE
-            // (RFC 5652); some older tools wrap it as
-            // OCTET STRING { SEQUENCE { SEQUENCE { ESSCertIDv2 } } }.
+            // The first element of the values SET carries the ESSCertID.
+            // Accepted shapes (first TLV of the values SET):
+            //  - RFC 5652: SEQUENCE (ESSCertIDv2)
+            //  - some older tools: OCTET STRING { SEQUENCE { SEQUENCE { ESSCertIDv2 } } }
+            //  - InfoCert-style: extra SEQUENCE wrappers around a v1 ESSCertID
+            auto assignSerial = [&out](const Tlv &sn) {
+                const unsigned char *s = sn.data;
+                std::size_t sl = sn.len;
+                while (sl > 1 && s[0] == 0) {
+                    ++s;
+                    --sl;
+                }
+                out.essSerial.assign(s, s + sl);
+            };
+            // Parses an ESSCertID at (p, len): either the RFC 5652 v2 form
+            // SEQUENCE { CertificateHash, [1] IssuerSerial } (certificateHash a
+            // BIT STRING, or an OCTET STRING in legacy non-compliant output) or
+            // the v1 form SEQUENCE { OCTET STRING hash, SEQUENCE { GeneralNames,
+            // INTEGER } } with the issuer name in a [4] field (explicit or
+            // implicit).
+            auto parseEss = [&out, &assignSerial](const unsigned char *p,
+                                                  std::size_t len) -> bool {
+                Tlv certHash;
+                if (!readTlv(p, len, 0, certHash))
+                    return false;
+                if (certHash.tag == 0x30) {
+                    // RFC 5652: CertificateHash ::= SEQUENCE { algId, certificateHash }
+                    Tlv algId, h, issWrap, issSer, name, sn;
+                    if (!readTlv(certHash.data, certHash.len, 0, algId) ||
+                        algId.tag != 0x30 ||
+                        !readTlv(certHash.data, certHash.len, algId.next, h) ||
+                        (h.tag != 0x03 && h.tag != 0x04) ||
+                        (h.tag == 0x03 && h.len < 1))
+                        return false;
+                    if (h.tag == 0x03) // BIT STRING: skip the unused-bits byte
+                        out.essCertHash.assign(h.data + 1, h.data + h.len);
+                    else
+                        out.essCertHash.assign(h.data, h.data + h.len);
+                    // IssuerSerial: [1] EXPLICIT (RFC 5652) or bare SEQUENCE
+                    if (!readTlv(p, len, certHash.next, issSer) || issSer.tag != 0x30) {
+                        if (!readTlv(p, len, certHash.next, issWrap) ||
+                            issWrap.tag != 0xA1 ||
+                            !readTlv(issWrap.data, issWrap.len, 0, issSer) ||
+                            issSer.tag != 0x30)
+                            return false;
+                    }
+                    // IssuerSerial ::= SEQUENCE { name Name, serialNumber INTEGER }
+                    if (!readTlv(issSer.data, issSer.len, 0, name) || name.tag != 0x30 ||
+                        !readTlv(issSer.data, issSer.len, name.next, sn) || sn.tag != 0x02)
+                        return false;
+                    // full Name TLV; name is the first field of issSer
+                    out.essIssuerDer.assign(issSer.data, name.data + name.len);
+                    assignSerial(sn);
+                    return true;
+                }
+                if (certHash.tag != 0x04)
+                    return false;
+                // v1 ESSCertID (asn1crypto / InfoCert):
+                // SEQUENCE { OCTET STRING hash, SEQUENCE { GeneralNames, INTEGER } }
+                out.essCertHash.assign(certHash.data, certHash.data + certHash.len);
+                Tlv issSer, gn, a4, sn;
+                if (!readTlv(p, len, certHash.next, issSer) || issSer.tag != 0x30 ||
+                    !readTlv(issSer.data, issSer.len, 0, gn) ||
+                    (gn.tag != 0x30 && gn.tag != 0x31) ||
+                    !readTlv(gn.data, gn.len, 0, a4) || a4.tag != 0xA4 ||
+                    !readTlv(issSer.data, issSer.len, gn.next, sn) || sn.tag != 0x02)
+                    return false;
+                // [4] carries the issuer Name: usually its raw content (implicit
+                // tagging), but InfoCert writes the full Name TLV (explicit)
+                Bytes nameTlv(a4.data, a4.data + a4.len);
+                if (nameTlv.empty() || nameTlv.front() != 0x30)
+                    nameTlv = der::tlv(0x30, nameTlv);
+                out.essIssuerDer = nameTlv;
+                assignSerial(sn);
+                return true;
+            };
+
             Tlv t, scv2, certsSeq;
-            const unsigned char *essP = nullptr;
-            std::size_t essLen = 0;
             if (readTlv(buf, n, v - buf, t)) {
                 if (t.tag == 0x30) {
-                    essP = t.data;
-                    essLen = t.len;
-                } else if (t.tag == 0x04 &&
-                           readTlv(t.data, t.len, 0, scv2) && scv2.tag == 0x30 &&
+                    if (!parseEss(t.data, t.len)) {
+                        // InfoCert-style extra wrappers: SEQUENCE { SEQUENCE { ... } }
+                        Tlv w1, w2;
+                        if (readTlv(t.data, t.len, 0, w1) && w1.tag == 0x30 &&
+                            readTlv(w1.data, w1.len, 0, w2) && w2.tag == 0x30)
+                            parseEss(w2.data, w2.len);
+                    }
+                } else if (t.tag == 0x04 && readTlv(t.data, t.len, 0, scv2) &&
+                           scv2.tag == 0x30 &&
                            readTlv(scv2.data, scv2.len, 0, certsSeq) &&
                            certsSeq.tag == 0x30 &&
                            readTlv(certsSeq.data, certsSeq.len, 0, t) && t.tag == 0x30) {
-                    essP = t.data;
-                    essLen = t.len;
-                }
-            }
-            Tlv certHash;
-            if (essP && readTlv(essP, essLen, 0, certHash)) {
-                if (certHash.tag == 0x30) {
-                    // RFC 5652: CertificateHash ::= SEQUENCE { algId, OCTET STRING }
-                    Tlv algId, h, issSer, name, sn;
-                    if (readTlv(certHash.data, certHash.len, 0, algId) && algId.tag == 0x30 &&
-                        readTlv(certHash.data, certHash.len, algId.next, h) &&
-                        h.tag == 0x04)
-                        out.essCertHash.assign(h.data, h.data + h.len);
-                    // IssuerSerial ::= SEQUENCE { name Name, serialNumber INTEGER }
-                    if (readTlv(essP, essLen, certHash.next, issSer) &&
-                        issSer.tag == 0x30 &&
-                        readTlv(issSer.data, issSer.len, 0, name) && name.tag == 0x30 &&
-                        readTlv(issSer.data, issSer.len, name.next, sn) && sn.tag == 0x02) {
-                        // full Name TLV; name is the first field of issSer
-                        out.essIssuerDer.assign(issSer.data, name.data + name.len);
-                        const unsigned char *s = sn.data;
-                        std::size_t sl = sn.len;
-                        while (sl > 1 && s[0] == 0) {
-                            ++s;
-                            --sl;
-                        }
-                        out.essSerial.assign(s, s + sl);
-                    }
-                } else if (certHash.tag == 0x04) {
-                    // old X.509 v1 ESSCertID (asn1crypto, the original Python tool):
-                    // SEQUENCE { OCTET STRING hash, IssuerSerial { GeneralNames { [4]
-                    // IMPLICIT Name }, INTEGER } }
-                    out.essCertHash.assign(certHash.data, certHash.data + certHash.len);
-                    Tlv issSer, gn, a4, sn;
-                    if (readTlv(essP, essLen, certHash.next, issSer) &&
-                        issSer.tag == 0x30 &&
-                        readTlv(issSer.data, issSer.len, 0, gn) &&
-                        (gn.tag == 0x30 || gn.tag == 0x31) &&
-                        readTlv(gn.data, gn.len, 0, a4) && a4.tag == 0xA4 &&
-                        readTlv(issSer.data, issSer.len, gn.next, sn) && sn.tag == 0x02) {
-                        // re-wrap the [4] IMPLICIT content as a standard Name TLV
-                        out.essIssuerDer = der::tlv(0x30,
-                                                    Bytes(a4.data, a4.data + a4.len));
-                        const unsigned char *s = sn.data;
-                        std::size_t sl = sn.len;
-                        while (sl > 1 && s[0] == 0) {
-                            ++s;
-                            --sl;
-                        }
-                        out.essSerial.assign(s, s + sl);
-                    }
+                    parseEss(t.data, t.len);
                 }
             }
         }

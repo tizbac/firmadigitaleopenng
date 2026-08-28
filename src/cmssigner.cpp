@@ -4,6 +4,8 @@
 
 #include <openssl/evp.h>
 
+#include <algorithm>
+
 namespace fdo {
 namespace {
 
@@ -29,14 +31,17 @@ Bytes issuerSerial(const X509Cert &c)
 
 Bytes essCertIdV2(const X509Cert &c)
 {
-    // RFC 5652: ESSCertIDv2 ::= SEQUENCE { certHash CertificateHash, issuerSerial, ... }
-    // CertificateHash ::= SEQUENCE { hashAlgorithm, certificateHash OCTET STRING }
+    // RFC 5652 6.3:
+    //   ESSCertIDv2       ::= SEQUENCE { certHash, issuerSerial [1] EXPLICIT, ... }
+    //   CertificateHash   ::= SEQUENCE { hashAlgorithm, certificateHash BIT STRING }
+    // (non-compliant encodings are rejected by standard P7M validators,
+    // which then report the signing-certificate attribute as absent)
     unsigned char md[32];
     unsigned int mdLen = 0;
     EVP_Digest(c.der.data(), c.der.size(), md, &mdLen, EVP_sha256(), nullptr);
     const Bytes certHash = der::seq(der::seq(der::oid(OID_SHA256)) +
-                                    der::octetString(md, mdLen));
-    return der::seq(certHash + issuerSerial(c));
+                                    der::bitString(Bytes(md, md + mdLen)));
+    return der::seq(certHash + der::explicitTag(1, issuerSerial(c)));
 }
 
 Bytes attrContentType(const CmsConfig &cfg)
@@ -75,14 +80,21 @@ std::vector<unsigned char> CmsSigner::buildSignedAttrs(const CmsConfig &cfg,
             *error = "certificato firmatario non valido (DER)";
         return {};
     }
-    const Bytes attrs =
-        attrContentType(cfg) + attrMessageDigest(cfg.content) +
-        attrSigningTime(cfg.signingTime ? cfg.signingTime : std::time(nullptr)) +
-        attrSigningCertV2(*cert);
+    // DER requires SET OF members sorted by their full TLV encoding
+    std::vector<Bytes> attrs{ attrContentType(cfg),
+                              attrSigningTime(cfg.signingTime
+                                                  ? cfg.signingTime
+                                                  : std::time(nullptr)),
+                              attrMessageDigest(cfg.content),
+                              attrSigningCertV2(*cert) };
+    std::sort(attrs.begin(), attrs.end());
+    Bytes sorted;
+    for (const auto &a : attrs)
+        sorted += a;
     // Canonical signed form: SET OF Attribute (0x31). RFC 5652 5.3: the
     // signature is computed over this form; assemble() stores the
     // [0] IMPLICIT (0xA0) form in the document.
-    return der::setOf(attrs);
+    return der::setOf(sorted);
 }
 
 std::vector<unsigned char> CmsSigner::assemble(const CmsConfig &cfg,
