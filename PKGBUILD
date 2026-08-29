@@ -19,6 +19,9 @@ url="https://example.invalid/firmadigitaleopen"
 license=('custom')
 depends=('qt6-base' 'poppler-qt6' 'openssl' 'libxml2')
 makedepends=('cmake' 'ninja' 'git')
+# makepkg strips binaries by default, but stripping libbit4xpki.so breaks it
+# (C_Initialize fails with CKR_GENERAL_ERROR). Never strip this module.
+options=('!strip')
 install=firmadigitaleopen.install
 source=("git+ssh://git@git.tizbac.ovh/tiziano/firmadigitaleopencpp.git")
 md5sums=('SKIP')

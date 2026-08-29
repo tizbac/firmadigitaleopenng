@@ -234,6 +234,7 @@ firmadigitaleopen-*.tar.gz
 # Arch Linux makepkg artifacts (srcdir clone + staged package)
 pkg/
 src/firmadigitaleopencpp/
+firmadigitaleopencpp/
 firmadigitaleopen-*.pkg.tar.zst
 
 # The proprietary Bit4id PKCS#11 module is deliberately tracked: it ships in the

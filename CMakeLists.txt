@@ -115,10 +115,15 @@ include(GNUInstallDirs)
 install(TARGETS firmadigitaleopen RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Bit4id PKCS#11 module + its run-time config, shipped inside the app's own
-# (libdir)/firmadigitaleopen so defaultP11Lib() finds it. None of the files are
-# in git (proprietary); if the .so is absent the package is still produced,
-# only without the bundled token module (and without its orphan config).
+# (libdir)/firmadigitaleopen so defaultP11Lib() finds it. The .so reads
+# libbit4xpki.so.conf from its own directory at load time, so the config (and
+# the .rc licences) must always ride along with the .so: a module without its
+# config does not work. Therefore, if the .so is present but the .conf is not,
+# refuse to configure instead of packaging a broken half-bundle.
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libbit4xpki.so")
+    if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libbit4xpki.so.conf")
+        message(FATAL_ERROR "libbit4xpki.so.conf manca accanto a libbit4xpki.so: il modulo token non funzionerebbe senza la sua configurazione")
+    endif()
     install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/libbit4xpki.so
             DESTINATION ${CMAKE_INSTALL_LIBDIR}/firmadigitaleopen)
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/libbit4xpki.so.conf
