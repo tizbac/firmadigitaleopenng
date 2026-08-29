@@ -1,3 +1,9 @@
+# About
+
+Let me be clear with that, this project is mostly vibe-coded, from original python version i made, if you are not ok with that, feel free to use the crashy ones that barely run on linux or require ubuntu 8.04 :)
+Resulting signatures have been verified against Infocert verification tool, and they fully pass.
+Beware for some smart card readers you may need not just opensc but also cccid drivers.
+
 # FirmaDigitaleOpen C++
 
 C++/Qt6 rewrite of the Python `FirmaDigitaleOpen` tool. It signs PDFs with
