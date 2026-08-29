@@ -427,9 +427,9 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
                            std::size_t &hexStart, std::string &lerr) -> bool {
         // --- signature dictionary ---
         std::string sigDict =
-            "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached\n"
-            "   /ByteRange [0000000000 0000000000 0000000000 0000000000]\n   <" +
-            std::string(sigHexLen, '0') + ">";
+            "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /ETSI.CAdES.detached\n"
+            "   /ByteRange [0000000000 0000000000 0000000000 0000000000]\n"
+            "   /Contents <" + std::string(sigHexLen, '0') + ">";
         sigDict += " /Length " + std::to_string(sigHexLen / 2) +
                    " /Name (" + escapePdfText(name) + ") >>";
 
@@ -548,10 +548,12 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
         if (cfg.visible)
             appendObj(pageObj, pageDict);
         if (cfg.visible) {
+            const std::string apStream = appearanceStream_ + "\n";
             const std::string apDict =
                 "<< /Type /XObject /Subtype /Form /BBox " + appearanceBBox_ +
-                " /Resources << /Font << /F1 /Helvetica >> >> >>\nstream\n" +
-                appearanceStream_ + "\nendstream";
+                " /Resources << /Font << /F1 /Helvetica >> >> /Length " +
+                std::to_string(apStream.size()) + " >>\nstream\n" + apStream +
+                "endstream";
             appendObj(apObj, apDict);
         }
 
@@ -621,11 +623,12 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
                 res.error = "ByteRange non trovato";
                 return res;
             }
-            // /ByteRange [low1 high1 low2 high2] = [0 X Y filesize]:
-            // the first number is already 0; "low2" = Y, "high2" = end
+            // /ByteRange [low1 len1 low2 len2]: first range = [0, X),
+            // second range = [Y, end-of-file) so the signature hex string
+            // (between X and Y) is excluded from the signed content.
             putRange(brPos + 23, X);
             putRange(brPos + 34, Y);
-            putRange(brPos + 45, out.size());
+            putRange(brPos + 45, out.size() - Y);
         }
         const std::vector<unsigned char> content(out.begin(), out.begin() + X);
         const std::vector<unsigned char> content2(out.begin() + Y, out.end());
@@ -634,7 +637,7 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
         ccfg.signerCertDer = cfg.signerCert.der;
         for (const auto &c : cfg.extraCerts)
             ccfg.extraCerts.push_back(c.der);
-        ccfg.contentTypeOid = "1.2.840.113549.1.9.3"; // application/pdf
+        ccfg.contentTypeOid = "1.2.840.113549.1.7.1"; // id-data (PAdES)
         ccfg.detached = true;
         ccfg.signingTime = std::time(nullptr);
         ccfg.content = content;
@@ -726,8 +729,9 @@ P7MResult Pades::verify(const std::vector<unsigned char> &pdfBytes,
             return r;
         }
     }
-    if (sigDict.find("/adbe.pkcs7.detached") == std::string::npos) {
-        r.error = "SubFilter non supportato (atteso adbe.pkcs7.detached)";
+    if (sigDict.find("/adbe.pkcs7.detached") == std::string::npos &&
+        sigDict.find("/ETSI.CAdES.detached") == std::string::npos) {
+        r.error = "SubFilter non supportato (atteso adbe.pkcs7.detached o ETSI.CAdES.detached)";
         return r;
     }
     if (!findKey(sigDict, "/ByteRange", off)) {
@@ -739,7 +743,7 @@ P7MResult Pades::verify(const std::vector<unsigned char> &pdfBytes,
         r.error = "firma: /ByteRange non valido";
         return r;
     }
-    // hex string value: from the "]" of the ByteRange array to the "<"
+    // hex string value (under /Contents): first "<" after the ByteRange array
     std::size_t hp = off;
     while (hp < sigDict.size() && sigDict[hp] != ']')
         ++hp;
@@ -747,10 +751,8 @@ P7MResult Pades::verify(const std::vector<unsigned char> &pdfBytes,
         r.error = "firma: /ByteRange non chiuso";
         return r;
     }
-    ++hp;
-    while (hp < sigDict.size() && std::isspace(static_cast<unsigned char>(sigDict[hp])))
-        ++hp;
-    if (hp >= sigDict.size() || sigDict[hp] != '<') {
+    hp = sigDict.find('<', hp);
+    if (hp == std::string::npos) {
         r.error = "firma: valore non trovato";
         return r;
     }
@@ -765,17 +767,17 @@ P7MResult Pades::verify(const std::vector<unsigned char> &pdfBytes,
         r.error = "firma: valore hex non valido";
         return r;
     }
-    // PAdES ByteRange: [low1 high1 low2 high2] with absolute offsets;
-    // signed content = [low1,high1) + [low2,high2)
-    if (br[0] > br[1] || br[2] > br[3] || br[1] > doc.pdf.size() ||
-        br[3] > doc.pdf.size()) {
+    // PAdES ByteRange: [low1 len1 low2 len2] with absolute offsets + lengths;
+    // signed content = [low1, low1+len1) + [low2, low2+len2)
+    if (br[0] + br[1] > doc.pdf.size() || br[2] + br[3] > doc.pdf.size() ||
+        br[0] + br[1] > br[2]) {
         r.error = "ByteRange fuori dai limiti del file";
         return r;
     }
     std::vector<unsigned char> content(doc.pdf.begin() + br[0],
-                                       doc.pdf.begin() + br[1]);
+                                       doc.pdf.begin() + br[0] + br[1]);
     content.insert(content.end(), doc.pdf.begin() + br[2],
-                   doc.pdf.begin() + br[3]);
+                   doc.pdf.begin() + br[2] + br[3]);
 
     r = P7M::verifyDetached(cms, content, anchors, now);
     if (r.ok)

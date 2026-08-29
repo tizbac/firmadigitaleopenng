@@ -49,7 +49,7 @@ qt_add_executable(firmadigitaleopen
     resources/resources.qrc
 )
 
-target_link_libraries(firmadigitaleopen PRIVATE Qt6::Widgets PopplerQt6 fdo_core)
+target_link_libraries(firmadigitaleopen PRIVATE Qt6::Widgets Qt6::Network PopplerQt6 fdo_core)
 
 enable_testing()
 
@@ -98,7 +98,7 @@ qt_add_executable(tst_guisign
     src/pdfpreview.cpp
     src/p11worker.cpp
 )
-target_link_libraries(tst_guisign PRIVATE Qt6::Widgets PopplerQt6 fdo_core)
+target_link_libraries(tst_guisign PRIVATE Qt6::Widgets Qt6::Network PopplerQt6 fdo_core)
 target_compile_definitions(tst_guisign PRIVATE
     FDO_SAMPLE_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/test.pdf")
 # When TESTP7M is set, the GUI test also exercises the verify tab (part C).
@@ -108,3 +108,57 @@ endif()
 add_test(NAME guisign
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_pkcs11.sh
                  $<TARGET_FILE:tst_guisign>)
+
+# ---------------------------------------------------------------- packaging --#
+include(GNUInstallDirs)
+
+install(TARGETS firmadigitaleopen RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# Bit4id PKCS#11 module + its run-time config, shipped inside the app's own
+# (libdir)/firmadigitaleopen so defaultP11Lib() finds it. None of the files are
+# in git (proprietary); if the .so is absent the package is still produced,
+# only without the bundled token module (and without its orphan config).
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libbit4xpki.so")
+    install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/libbit4xpki.so
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/firmadigitaleopen)
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/libbit4xpki.so.conf
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/firmadigitaleopen)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/libbit4xpki.so.rc
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/firmadigitaleopen
+            FILES_MATCHING PATTERN "*.lic")
+else()
+    message(WARNING "libbit4xpki.so non trovato: il pacchetto non includera il modulo token Bit4id")
+endif()
+
+install(FILES resources/firmadigitaleopen.desktop
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(FILES resources/firmadigitaleopen.svg
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+
+# ------------------------------------------------------------------- CPack --#
+set(CPACK_PACKAGE_NAME "firmadigitaleopen")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_VENDOR "FirmaDigitaleOpen")
+set(CPACK_PACKAGE_CONTACT "firmadigitaleopen@example.invalid")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Firma digitale PAdES/P7M con token PKCS#11")
+set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+set(CPACK_GENERATOR "DEB")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "FirmaDigitaleOpen <firmadigitaleopen@example.invalid>")
+set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
+set(CPACK_DEBIAN_PACKAGE_DEPENDS
+    "libqt6widgets6, libqt6network6, libqt6sql6, libpoppler-qt6-6, libssl3, libxml2")
+if (NOT CPACK_DEBIAN_PACKAGE_ARCHITECTURE)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "arm64")
+    else()
+        set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+    endif()
+endif()
+set(CPACK_PACKAGE_FILE_NAME
+    "${CPACK_PACKAGE_NAME}_${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}")
+# Refresh desktop+mime databases after install so the .pdf/.p7m file
+# association (MimeType in the .desktop file) takes effect immediately.
+set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+    "${CMAKE_CURRENT_SOURCE_DIR}/packaging/postinst")
+include(CPack)

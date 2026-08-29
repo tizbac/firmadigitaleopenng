@@ -1,0 +1,14 @@
+# Source/VCS detritus
+.git
+.gitignore
+_CPack_Packages/
+build/
+build-new/
+build-deb/
+build-plain/
+*.deb
+
+# Editor/OS junk
+.vscode/
+.idea/
+*.user

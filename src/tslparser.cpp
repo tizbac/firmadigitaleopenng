@@ -66,6 +66,106 @@ bool isElement(const xmlNode *n, const char *name, const char *ns)
            n->ns && std::strcmp(reinterpret_cast<const char *>(n->ns->href), ns) == 0;
 }
 
+// Days since 1970-01-01 for a proleptic Gregorian date (Hinnant algorithm).
+long long daysFromCivil(int y, int m, int d)
+{
+    y -= m <= 2;
+    const long long era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy =
+        (static_cast<unsigned>(153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) +
+        static_cast<unsigned>(d) - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<long long>(doe) - 719468;
+}
+
+// XS dateTime -> seconds since epoch (UTC), or -1 if unparseable.
+// Accepts Z, +/-HH:MM and +/-HHMM offsets and a fractional-seconds part;
+// a missing timezone designator is read as UTC.
+std::time_t xsDateTimeToEpoch(const std::string &s)
+{
+    auto digits = [&s](size_t off, size_t n, int &out) -> bool {
+        if (off + n > s.size())
+            return false;
+        int v = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const char c = s[off + i];
+            if (c < '0' || c > '9')
+                return false;
+            v = v * 10 + (c - '0');
+        }
+        out = v;
+        return true;
+    };
+
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0;
+    if (!digits(0, 4, y) || !digits(5, 2, mo) || !digits(8, 2, d) ||
+        s.size() <= 10 || (s[10] != 'T' && s[10] != 't'))
+        return -1;
+    if (!digits(11, 2, h) || !digits(14, 2, mi))
+        return -1;
+    if (y < 1900 || mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59)
+        return -1;
+
+    int sec = 0, tz = 0; // tz: offset in minutes
+    size_t i = 16;       // past "YYYY-MM-DDTHH:MM"
+    if (s.size() >= 19 && s[16] == ':' && digits(17, 2, sec)) {
+        if (sec > 59)
+            return -1;
+        i = 19;
+    }
+    if (i < s.size()) {
+        if (s[i] == '.') {
+            ++i;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9')
+                ++i;
+        }
+        if (i >= s.size() || (s[i] != 'Z' && s[i] != '+' && s[i] != '-'))
+            return -1;
+        if (s[i] == 'Z') {
+            ++i;
+        } else {
+            const bool minus = s[i] == '-';
+            int th = 0, tm = 0;
+            if (i + 5 < s.size() && s[i + 3] == ':') {
+                if (!digits(i + 1, 2, th) || !digits(i + 4, 2, tm))
+                    return -1;
+                i += 6;
+            } else if (i + 4 < s.size()) {
+                if (!digits(i + 1, 2, th) || !digits(i + 3, 2, tm))
+                    return -1;
+                i += 5;
+            } else {
+                return -1;
+            }
+            if (th > 23 || tm > 59)
+                return -1;
+            tz = th * 60 + tm;
+            if (minus)
+                tz = -tz;
+        }
+        if (i != s.size())
+            return -1; // trailing garbage
+    }
+
+    const long long days = daysFromCivil(y, mo, d);
+    return static_cast<std::time_t>(days * 86400LL + h * 3600LL + mi * 60LL + sec) -
+           tz * 60;
+}
+
+void parseSchemeInformation(const xmlNode *si, Tsl &tsl)
+{
+    if (const xmlNode *v = childByName(si, "TSLVersionIdentifier", kNsTsl))
+        tsl.versionIdentifier = textOf(v);
+    if (const xmlNode *s = childByName(si, "TSLSequenceNumber", kNsTsl))
+        tsl.sequenceNumber = textOf(s);
+    if (const xmlNode *ld = childByName(si, "ListIssueDateTime", kNsTsl))
+        tsl.issueDateTime = textOf(ld);
+    if (const xmlNode *nu = childByName(si, "NextUpdate", kNsTsl))
+        if (const xmlNode *dt = childByName(nu, "dateTime"))
+            tsl.nextUpdate = textOf(dt);
+}
+
 void collectCerts(const xmlNode *n, std::vector<std::vector<unsigned char>> &out)
 {
     for (const xmlNode *c = n; c; c = c->next) {
@@ -187,12 +287,8 @@ std::unique_ptr<Tsl> TslParser::parseXml(const std::string &xml)
         return nullptr;
     }
     tsl->root = root;
-    if (const xmlNode *si = childByName(root, "SchemeInformation", kNsTsl)) {
-        if (const xmlNode *v = childByName(si, "TSLVersionIdentifier", kNsTsl))
-            tsl->versionIdentifier = textOf(v);
-        if (const xmlNode *s = childByName(si, "TSLSequenceNumber", kNsTsl))
-            tsl->sequenceNumber = textOf(s);
-    }
+    if (const xmlNode *si = childByName(root, "SchemeInformation", kNsTsl))
+        parseSchemeInformation(si, *tsl);
     collectCerts(root, tsl->allCerts);
     parseServices(root, *tsl);
     parseSignature(root, *tsl);
@@ -214,16 +310,22 @@ std::unique_ptr<Tsl> TslParser::parseFile(const std::string &path)
         return nullptr;
     }
     tsl->root = root;
-    if (const xmlNode *si = childByName(root, "SchemeInformation", kNsTsl)) {
-        if (const xmlNode *v = childByName(si, "TSLVersionIdentifier", kNsTsl))
-            tsl->versionIdentifier = textOf(v);
-        if (const xmlNode *s = childByName(si, "TSLSequenceNumber", kNsTsl))
-            tsl->sequenceNumber = textOf(s);
-    }
+    if (const xmlNode *si = childByName(root, "SchemeInformation", kNsTsl))
+        parseSchemeInformation(si, *tsl);
     collectCerts(root, tsl->allCerts);
     parseServices(root, *tsl);
     parseSignature(root, *tsl);
     return tsl;
+}
+
+bool Tsl::upToDate(std::time_t now) const
+{
+    if (nextUpdate.empty())
+        return false;
+    const std::time_t nu = xsDateTimeToEpoch(nextUpdate);
+    if (nu < 0)
+        return false;
+    return now <= nu;
 }
 
 } // namespace fdo

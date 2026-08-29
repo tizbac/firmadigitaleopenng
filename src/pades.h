@@ -33,7 +33,7 @@ struct PadesResult
 class Pades
 {
 public:
-    // PAdES-BES: append a detached CMS signature (adbe.pkcs7.detached) as a
+    // PAdES-BES: append a detached CMS signature (ETSI.CAdES.detached) as a
     // PDF incremental update. sign() performs the SHA256-RSA operation
     // internally (e.g. CKM_SHA256_RSA_PKCS on a token).
     static PadesResult sign(const PadesConfig &cfg, const SignFunction &sign);

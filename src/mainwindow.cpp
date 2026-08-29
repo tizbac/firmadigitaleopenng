@@ -26,6 +26,13 @@
 #include <QTimer>
 #include <QProgressDialog>
 #include <QMetaType>
+#include <QUrl>
+#include <QDir>
+#include <QStandardPaths>
+#include <QEventLoop>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
 
 #include <algorithm>
 #include <map>
@@ -60,7 +67,20 @@ bool writeFileBytes(const QString &path, const std::vector<unsigned char> &bytes
     return true;
 }
 
+// Official Italian TSL from the AgID eIDAS Digital Service list.
+const char kTslUrl[] = "https://eidas.agid.gov.it/TL/TSL-IT.xml";
+
 } // namespace
+
+struct MainWindow::TslResolution {
+    enum class State { Ok, NoTsl };
+    State state = State::NoTsl;
+    QString path;   // TSL file actually used (cache, download or explicit select)
+    QString info;   // human-readable TSL identity shown in the verification report
+    QString error;  // reason when state != Ok
+    std::vector<std::unique_ptr<fdo::X509Cert>> certs;
+    std::vector<const fdo::X509Cert *> anchors;
+};
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -312,15 +332,18 @@ QWidget *MainWindow::buildVerifyTab()
         connect(b, &QPushButton::clicked, this, &MainWindow::browseVerifyP7m);
         row->addWidget(m_verifyP7m, 1);
         row->addWidget(b);
-        form->addRow(tr("File .p7m da verificare:"), row);
+        form->addRow(tr("File firmato da verificare (.pdf / .p7m):"), row);
     }
     {
         auto *row = new QHBoxLayout;
         m_verifyTsl = new QLineEdit;
         auto *b = new QPushButton(tr("Sfoglia..."));
         connect(b, &QPushButton::clicked, this, &MainWindow::browseVerifyTsl);
+        m_tslRefreshBtn = new QPushButton(tr("Aggiorna TSL"));
+        connect(m_tslRefreshBtn, &QPushButton::clicked, this, &MainWindow::refreshTsl);
         row->addWidget(m_verifyTsl, 1);
         row->addWidget(b);
+        row->addWidget(m_tslRefreshBtn);
         form->addRow(tr("TSL di fiducia (opzionale):"), row);
     }
 
@@ -670,8 +693,8 @@ void MainWindow::onSignFinished(int kind, bool ok, const QString &error,
 void MainWindow::browseVerifyP7m()
 {
     const QString path = QFileDialog::getOpenFileName(
-        this, tr("Seleziona file .p7m"), QString(),
-        tr("P7M files (*.p7m);;Tutti (*.*)"));
+        this, tr("Seleziona un file firmato"), QString(),
+        tr("File firmati (*.pdf *.p7m);;PDF (*.pdf);;P7M (*.p7m);;Tutti (*.*)"));
     if (path.isEmpty())
         return;
     m_verifyP7m->setText(path);
@@ -687,16 +710,170 @@ void MainWindow::browseVerifyTsl()
         m_verifyTsl->setText(path);
 }
 
+QString MainWindow::cachedTslPath() const
+{
+    QString dir = QString::fromLocal8Bit(qgetenv("FDO_TSL_CACHE_DIR"));
+    if (dir.isEmpty())
+        dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    QDir().mkpath(dir);
+    return dir + "/TSL-IT.xml";
+}
+
+bool MainWindow::downloadTsl(const QUrl &url, QByteArray &out, QString &err) const
+{
+    QNetworkAccessManager nam;
+    QNetworkRequest req(url);
+    req.setTransferTimeout(15000);
+    req.setRawHeader("User-Agent", QByteArrayLiteral("FirmaDigitaleOpen"));
+    QNetworkReply *reply = nam.get(req);
+    QEventLoop loop;
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+    const bool ok = reply->error() == QNetworkReply::NoError;
+    if (ok)
+        out = reply->readAll();
+    else
+        err = reply->errorString();
+    reply->deleteLater();
+    return ok && !out.isEmpty();
+}
+
+void MainWindow::refreshTsl()
+{
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QByteArray data;
+    QString derr;
+    const bool ok = downloadTsl(QUrl(QString::fromLatin1(kTslUrl)), data, derr);
+    QApplication::restoreOverrideCursor();
+    if (!ok) {
+        QMessageBox::critical(this, tr("Aggiornamento TSL non riuscito"),
+                              tr("Impossibile scaricare la TSL:\n%1").arg(derr));
+        return;
+    }
+    const QString cache = cachedTslPath();
+    std::string werr;
+    const std::vector<unsigned char> bytes(data.constBegin(), data.constEnd());
+    if (!writeFileBytes(cache, bytes, werr)) {
+        QMessageBox::critical(this, tr("Errore"), QString::fromStdString(werr));
+        return;
+    }
+    auto tsl = fdo::TslParser::parseFile(cache.toStdString());
+    if (!tsl) {
+        QMessageBox::warning(this, tr("TSL non valida"),
+                             tr("Il file scaricato non è una TSL analizzabile:\n%1")
+                                 .arg(cache));
+        return;
+    }
+    m_verifyStatus->setText(tr("TSL aggiornata: %1 (%2 certificati)")
+                                .arg(QString::fromStdString(tsl->issueDateTime))
+                                .arg(tsl->allCerts.size()));
+}
+
+MainWindow::TslResolution MainWindow::resolveTsl(bool allowDownload)
+{
+    TslResolution res;
+    const QString tslPath = m_verifyTsl->text().trimmed();
+
+    const auto takeCerts = [&res](const fdo::Tsl &tsl) {
+        for (const auto &der : tsl.allCerts) {
+            auto c = fdo::X509Cert::fromDer(der);
+            if (c) {
+                res.certs.push_back(std::move(c));
+                res.anchors.push_back(res.certs.back().get());
+            }
+        }
+        return !res.anchors.empty();
+    };
+    const auto infoOf = [](const fdo::Tsl &tsl) {
+        return QStringLiteral("TSL del %1 (aggiornamento previsto %2)")
+            .arg(QString::fromStdString(tsl.issueDateTime),
+                 QString::fromStdString(tsl.nextUpdate));
+    };
+
+    if (!tslPath.isEmpty()) {
+        if (!QFileInfo::exists(tslPath)) {
+            res.error = tr("Il file TSL indicato non esiste: %1").arg(tslPath);
+            return res;
+        }
+        auto tsl = fdo::TslParser::parseFile(tslPath.toStdString());
+        if (!tsl) {
+            res.error = tr("Impossibile analizzare il file TSL: %1").arg(tslPath);
+            return res;
+        }
+        if (!tsl->upToDate()) {
+            res.error = tr("TSL non aggiornata (aggiornamento previsto il %1): %2.\n"
+                           "Usa \"Aggiorna TSL\" per scaricare la lista corrente, "
+                           "oppure seleziona una versione aggiornata.")
+                            .arg(QString::fromStdString(tsl->nextUpdate), tslPath);
+            return res;
+        }
+        if (!takeCerts(*tsl)) {
+            res.error = tr("Nessun certificato di fiducia nella TSL: %1").arg(tslPath);
+            return res;
+        }
+        res.path = tslPath;
+        res.info = infoOf(*tsl);
+        res.state = TslResolution::State::Ok;
+        return res;
+    }
+
+    const QString cache = cachedTslPath();
+    if (QFileInfo::exists(cache)) {
+        auto tsl = fdo::TslParser::parseFile(cache.toStdString());
+        if (tsl && tsl->upToDate() && takeCerts(*tsl)) {
+            res.path = cache;
+            res.info = infoOf(*tsl);
+            res.state = TslResolution::State::Ok;
+            return res;
+        }
+        res.certs.clear();
+        res.anchors.clear();
+    }
+
+    if (allowDownload) {
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        QByteArray data;
+        QString derr;
+        const bool ok = downloadTsl(QUrl(QString::fromLatin1(kTslUrl)), data, derr);
+        QApplication::restoreOverrideCursor();
+        if (ok) {
+            std::string werr;
+            const std::vector<unsigned char> bytes(data.constBegin(), data.constEnd());
+            if (writeFileBytes(cache, bytes, werr)) {
+                auto tsl = fdo::TslParser::parseFile(cache.toStdString());
+                if (tsl && tsl->upToDate() && takeCerts(*tsl)) {
+                    res.path = cache;
+                    res.info = infoOf(*tsl);
+                    res.state = TslResolution::State::Ok;
+                    return res;
+                }
+                res.certs.clear();
+                res.anchors.clear();
+            }
+        }
+        res.error = tr("Nessuna TSL disponibile: impossibile scaricare la lista di "
+                       "fiducia (%1). La verifica non può stabilire una catena di "
+                       "fiducia senza una TSL aggiornata.")
+                        .arg(derr.isEmpty() ? tr("dati non validi") : derr);
+        return res;
+    }
+
+    res.error = tr("Nessuna TSL disponibile o aggiornata: la verifica non può "
+                   "stabilire una catena di fiducia senza una TSL aggiornata.");
+    return res;
+}
+
 void MainWindow::verifyP7m()
 {
     const QString p7mPath = m_verifyP7m->text().trimmed();
-    const QString tslPath = m_verifyTsl->text().trimmed();
 
     if (p7mPath.isEmpty() || !QFileInfo::exists(p7mPath)) {
         QMessageBox::warning(this, tr("Ingresso mancante"),
-                             tr("Seleziona un file .p7m esistente."));
+                             tr("Seleziona un file firmato (.pdf o .p7m) esistente."));
         return;
     }
+
+    const bool isPdf = p7mPath.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive);
 
     std::string err;
     std::vector<unsigned char> bytes;
@@ -705,65 +882,36 @@ void MainWindow::verifyP7m()
         return;
     }
 
-    // Trust anchors: the certificates listed in the TSL (when provided).
-    std::vector<const fdo::X509Cert *> anchors;
-    std::vector<std::unique_ptr<fdo::X509Cert>> anchorCerts;
-    bool tslUsed = false;
-    if (!tslPath.isEmpty()) {
-        if (!QFileInfo::exists(tslPath)) {
-            QMessageBox::warning(this, tr("TSL mancante"),
-                                 tr("Il file TSL indicato non esiste."));
-            return;
-        }
-        auto tsl = fdo::TslParser::parseFile(tslPath.toStdString());
-        if (!tsl) {
-            QMessageBox::critical(this, tr("Errore TSL"),
-                                  tr("Impossibile analizzare il file TSL."));
-            return;
-        }
-        for (const auto &der : tsl->allCerts) {
-            auto c = fdo::X509Cert::fromDer(der);
-            if (c) {
-                anchorCerts.push_back(std::move(c));
-                anchors.push_back(anchorCerts.back().get());
-            }
-        }
-        if (anchors.empty()) {
-            QMessageBox::warning(this, tr("TSL vuota"),
-                                 tr("Nessun certificato trovato nella TSL."));
-            return;
-        }
-        tslUsed = true;
+    // A fresh, usable TSL is mandatory: without it no trust chain can be
+    // established and the signature cannot be declared valid. If none was
+    // selected or cached, try to download the current Italian list first.
+    const bool allowDownload = qEnvironmentVariableIsEmpty("FDO_DISABLE_TSL_DOWNLOAD");
+    const TslResolution tslRes = resolveTsl(allowDownload);
+
+    if (tslRes.state != TslResolution::State::Ok) {
+        m_verifyReport->setPlainText(tr("=== FIRMA NON VALIDA ===\n\n%1\n")
+                                         .arg(tslRes.error));
+        m_verifyContent.clear();
+        m_verifyContentReady = false;
+        m_saveOriginalBtn->setEnabled(false);
+        m_verifyStatus->setText(tr("Firma non valida (nessuna TSL aggiornata)."));
+        return;
     }
 
     m_verifyStatus->setText(tr("Verifica in corso..."));
     QApplication::setOverrideCursor(Qt::WaitCursor);
-    fdo::P7MResult res = fdo::P7M::decodeAndVerify(bytes, anchors);
-    bool selfAnchored = false;
-    if (!res.ok && !tslUsed && !res.signerCertDer.empty()) {
-        // No TSL given: retry with the embedded signer certificate as its own
-        // anchor. The RSA signature and content digest are still fully
-        // checked; only the trust chain is not evaluated.
-        auto signer = fdo::X509Cert::fromDer(res.signerCertDer);
-        if (signer) {
-            const std::vector<const fdo::X509Cert *> selfAnchors{ signer.get() };
-            const fdo::P7MResult r2 = fdo::P7M::decodeAndVerify(bytes, selfAnchors);
-            if (r2.ok) {
-                res = r2;
-                selfAnchored = true;
-            }
-        }
-    }
+    const fdo::P7MResult res =
+        isPdf ? fdo::Pades::verify(bytes, tslRes.anchors)
+              : fdo::P7M::decodeAndVerify(bytes, tslRes.anchors);
     QApplication::restoreOverrideCursor();
 
     QString report;
     if (res.ok) {
         report += tr("=== FIRMA VALIDA ===\n\n");
-        if (selfAnchored) {
-            report += tr("Nota: nessun TSL caricato; verificata con il certificato "
-                         "del firmatario come ancora di fiducia propria (integrità "
-                         "e autenticità OK, catena di fiducia non valutata).\n\n");
-        }
+        report += tr("Tipo di firma: %1\n")
+                      .arg(isPdf ? tr("PDF firmato (PAdES incorporato)")
+                                 : tr("File P7M (CAdES)"));
+        report += tr("TSL di fiducia: %1\n").arg(tslRes.info);
         report += tr("Firmatario: %1\n").arg(QString::fromStdString(res.signerSubject));
         report += tr("Emittente: %1\n").arg(QString::fromStdString(res.signerIssuer));
         report += tr("Seriale: %1\n").arg(QString::fromStdString(res.signerSerial));
@@ -776,6 +924,7 @@ void MainWindow::verifyP7m()
                          "ma non lo è più oggi.\n");
     } else {
         report += tr("=== FIRMA NON VALIDA ===\n\n");
+        report += tr("TSL di fiducia: %1\n").arg(tslRes.info);
         report += QString::fromStdString(res.error) + "\n";
         if (!res.signerSubject.empty()) {
             report += "\n" + tr("Firmatario: %1\n")
@@ -793,10 +942,8 @@ void MainWindow::verifyP7m()
     m_verifyContentReady = res.ok && !res.content.empty();
     m_saveOriginalBtn->setEnabled(m_verifyContentReady);
 
-    m_verifyStatus->setText(res.ok
-                                ? (selfAnchored ? tr("Firma valida (ancora propria, nessun TSL).")
-                                                : tr("Firma valida."))
-                                : tr("Firma non valida."));
+    m_verifyStatus->setText(res.ok ? tr("Firma valida.")
+                                   : tr("Firma non valida."));
 }
 
 void MainWindow::saveOriginalFile()

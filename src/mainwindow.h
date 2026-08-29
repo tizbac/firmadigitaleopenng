@@ -20,6 +20,7 @@ class QPlainTextEdit;
 class QThread;
 class QTimer;
 class QProgressDialog;
+class QUrl;
 
 namespace fdo {
 class PdfPreview;
@@ -35,7 +36,7 @@ public:
     ~MainWindow() override;
 
     // Switch to the verification tab, load `path` and run the verification.
-    // Used when a .p7m file is opened via the file association.
+    // Used when a signed .pdf / .p7m file is opened via the file association.
     void openFileForVerify(const QString &path);
 
     // Plain text of the last verification report (empty before the first run).
@@ -51,6 +52,7 @@ private slots:
     void signFile();
     void browseVerifyP7m();
     void browseVerifyTsl();
+    void refreshTsl();
     void verifyP7m();
     void saveOriginalFile();
     void onSlotsEnumerated(int gen, const std::vector<fdo::Pkcs11Slot> &found,
@@ -86,6 +88,12 @@ private:
     void showProgress(const QString &text);
     void hideProgress();
 
+    // TSL resolution / freshness handling for the verify tab.
+    QString cachedTslPath() const;
+    bool downloadTsl(const QUrl &url, QByteArray &out, QString &err) const;
+    struct TslResolution;
+    TslResolution resolveTsl(bool allowDownload);
+
     QTabWidget *m_tabs = nullptr;
 
     // PAdES tab
@@ -114,6 +122,7 @@ private:
     // Verify tab
     QLineEdit *m_verifyP7m = nullptr;
     QLineEdit *m_verifyTsl = nullptr;
+    QPushButton *m_tslRefreshBtn = nullptr;
     QPushButton *m_verifyBtn = nullptr;
     QPushButton *m_saveOriginalBtn = nullptr;
     QPlainTextEdit *m_verifyReport = nullptr;

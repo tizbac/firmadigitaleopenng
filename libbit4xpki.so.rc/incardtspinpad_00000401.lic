@@ -1,0 +1,8 @@
+tokenname=incardtspinpad
+licensetext=license for token type incardtspinpad (00000401)
+DsPinIsCNSPin=true
+DSPinUseGui=false
+HideCacheDsPinCheck=false
+pinpad=true
+
+522728E235C858333664F7F788130E18DC3F5B2D

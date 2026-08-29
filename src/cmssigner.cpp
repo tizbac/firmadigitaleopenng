@@ -23,25 +23,24 @@ const char *OID_ATTR_SIGNING_CERT_V2 = "1.2.840.113549.1.9.16.2.47";
 
 Bytes digestAlgorithmSha256() { return der::seq(der::oid(OID_SHA256)); }
 
-Bytes issuerSerial(const X509Cert &c)
-{
-    return der::seq(c.issuerNameDer + der::integerBigEndian(c.serialRaw.data(),
-                                                            c.serialRaw.size()));
-}
-
 Bytes essCertIdV2(const X509Cert &c)
 {
-    // RFC 5652 6.3:
-    //   ESSCertIDv2       ::= SEQUENCE { certHash, issuerSerial [1] EXPLICIT, ... }
-    //   CertificateHash   ::= SEQUENCE { hashAlgorithm, certificateHash BIT STRING }
-    // (non-compliant encodings are rejected by standard P7M validators,
-    // which then report the signing-certificate attribute as absent)
+    // RFC 5035 (decoded by poppler/NSS via SigningCertificateV2DecodingTemplate):
+    //   ESSCertIDv2 ::= SEQUENCE {
+    //     hashAlgorithm AlgorithmIdentifier OPTIONAL,   // default = sha256
+    //     certHash     OCTET STRING,
+    //     issuerSerial SEQUENCE {
+    //       issuer      SEQUENCE { [4] CertificateName },
+    //       serialNumber INTEGER
+    //     } OPTIONAL }
     unsigned char md[32];
     unsigned int mdLen = 0;
     EVP_Digest(c.der.data(), c.der.size(), md, &mdLen, EVP_sha256(), nullptr);
-    const Bytes certHash = der::seq(der::seq(der::oid(OID_SHA256)) +
-                                    der::bitString(Bytes(md, md + mdLen)));
-    return der::seq(certHash + der::explicitTag(1, issuerSerial(c)));
+    const Bytes certHash = der::octetString(md, mdLen);
+    const Bytes genNames = der::seq(der::explicitTag(4, Bytes(c.issuerNameDer)));
+    const Bytes issuerSerial =
+        der::seq(genNames + der::integerBigEndian(c.serialRaw.data(), c.serialRaw.size()));
+    return der::seq(der::seq(der::oid(OID_SHA256)) + certHash + issuerSerial);
 }
 
 Bytes attrContentType(const CmsConfig &cfg)
@@ -65,8 +64,12 @@ Bytes attrSigningTime(std::time_t t)
 
 Bytes attrSigningCertV2(const X509Cert &c)
 {
-    // AttributeValue: SET OF { ESSCertIDv2 } (no extra wrapping)
-    return der::seq(der::oid(OID_ATTR_SIGNING_CERT_V2) + der::setOf(essCertIdV2(c)));
+    // SigningCertificateV2 ::= SEQUENCE { certs SEQUENCE OF ESSCertIDv2 };
+    // the attribute value is one SigningCertificateV2, i.e. a SEQUENCE
+    // wrapping a SEQUENCE OF wrapping the single ESSCertIDv2 (as emitted
+    // by common signers and expected by poppler/NSS).
+    return der::seq(der::oid(OID_ATTR_SIGNING_CERT_V2) +
+                    der::setOf(der::seq(der::seq(essCertIdV2(c)))));
 }
 
 } // namespace
@@ -121,8 +124,11 @@ std::vector<unsigned char> CmsSigner::assemble(const CmsConfig &cfg,
     // digest algorithms (RFC 8017)
     const Bytes sigAlg = der::seq(der::oid(OID_SHA256_RSA) + der::nullValue());
 
+    const Bytes signerId =
+        der::seq(cert->issuerNameDer + der::integerBigEndian(cert->serialRaw.data(),
+                                                             cert->serialRaw.size()));
     const Bytes signerInfo =
-        der::seq(der::integer(1) + issuerSerial(*cert) + digestAlgorithmSha256() +
+        der::seq(der::integer(1) + signerId + digestAlgorithmSha256() +
                   storedAttrs + sigAlg + der::octetString(signature));
 
     Bytes encapContent = der::oid(cfg.contentTypeOid);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ctime>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,6 +32,8 @@ struct Tsl
 
     std::string versionIdentifier;
     std::string sequenceNumber;
+    std::string issueDateTime; // SchemeInformation > ListIssueDateTime > dateTime
+    std::string nextUpdate;    // SchemeInformation > NextUpdate > dateTime
 
     std::vector<std::vector<unsigned char>> allCerts; // every X509Certificate, document order
     std::vector<TslService> services;
@@ -43,6 +46,10 @@ struct Tsl
 
     _xmlDoc *xmlDoc = nullptr; // owned: the parsed document
     _xmlNode *root = nullptr;  // root element (borrowed from xmlDoc)
+
+    // True when NextUpdate is present and in the future: the list may still
+    // be trusted as up to date. A missing/unparseable NextUpdate is stale.
+    bool upToDate(std::time_t now = std::time(nullptr)) const;
 };
 
 class TslParser

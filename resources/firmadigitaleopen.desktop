@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=FirmaDigitaleOpen
+GenericName=Firma digitale
+Comment=Firma e verifica documenti PAdES (PDF) e P7M con token PKCS#11
+Exec=firmadigitaleopen %f
+Icon=firmadigitaleopen
+Terminal=false
+Categories=Office;Security;Qt;
+Keywords=crypto;security;signature;PAdES;P7M;digital;
+MimeType=application/pdf;application/pkcs7-mime;application/x-pkcs7-mime;application/pkcs7-signature;application/x-pkcs7-signature;
+StartupNotify=true

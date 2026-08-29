@@ -219,4 +219,18 @@ __marimo__/
 *.p7m
 
 # C++ build directories
+build/
+build-new/
 build-plain/
+build-deb/
+
+# Generated Debian packages (CPack)
+*.deb
+_CPack_Packages/
+
+# Arch Linux source tarballs (built locally for makepkg)
+firmadigitaleopen-*.tar.gz
+
+# The proprietary Bit4id PKCS#11 module is deliberately tracked: it ships in the
+# produced packages, so keep it next to the repo. (Overrides the global *.so.)
+!libbit4xpki.so
