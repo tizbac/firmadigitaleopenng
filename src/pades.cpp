@@ -413,12 +413,19 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
     const int acroObj = doc.maxObj + 3;
     const bool newCat = !doc.hasAcroForm;
     const int catObj = doc.maxObj + 4;
-    const int pageObj = doc.maxObj + 5;
-    const int apObj = doc.maxObj + 6;
-    const int sizeObj = doc.maxObj + 7;
+    const int apObj = doc.maxObj + 5;
 
     const std::string name =
         cfg.signerName.empty() ? pdfName(cfg.signerCert) : cfg.signerName;
+
+    int pageRef = 0;
+    if (cfg.visible) {
+        if (cfg.onPage < 0 || cfg.onPage >= static_cast<int>(doc.pages.size())) {
+            res.error = "pagina non valida";
+            return res;
+        }
+        pageRef = doc.pages[cfg.onPage];
+    }
 
     std::string appearanceStream_;
     std::string appearanceBBox_;
@@ -461,7 +468,8 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
             appearanceBBox_ = std::string("[0 0 ") + wStr + " " + hStr + "]";
             fieldDict = "<< /Type /Annot /Subtype /Widget /FT /Sig /T (" +
                         escapePdfText(cfg.fieldName) + ") /V " +
-                        std::to_string(sigObj) + " 0 R\n   /Rect [" +
+                        std::to_string(sigObj) + " 0 R /P " +
+                        std::to_string(pageRef) + " 0 R\n   /Rect [" +
                         std::to_string(cfg.boxX1) + " " + std::to_string(cfg.boxY1) +
                         " " + std::to_string(cfg.boxX2) + " " +
                         std::to_string(cfg.boxY2) +
@@ -499,9 +507,7 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
 
         // --- page (visible only: add the annotation) ---
         std::string pageDict;
-        int pageRef = 0;
         if (cfg.visible) {
-            pageRef = doc.pages[cfg.onPage];
             auto it = doc.objOffset.find(pageRef);
             if (it == doc.objOffset.end()) {
                 lerr = "oggetto pagina non trovato";
@@ -546,12 +552,12 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
         if (newCat)
             appendObj(catObj, catDict);
         if (cfg.visible)
-            appendObj(pageObj, pageDict);
+            appendObj(pageRef, pageDict);
         if (cfg.visible) {
             const std::string apStream = appearanceStream_ + "\n";
             const std::string apDict =
                 "<< /Type /XObject /Subtype /Form /BBox " + appearanceBBox_ +
-                " /Resources << /Font << /F1 /Helvetica >> >> /Length " +
+                " /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> /Length " +
                 std::to_string(apStream.size()) + " >>\nstream\n" + apStream +
                 "endstream";
             appendObj(apObj, apDict);
@@ -570,7 +576,8 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
         const std::size_t tailStart = doc.pdf.size();
         auto objAt = [&](int num) -> std::size_t {
             const std::string s(reinterpret_cast<const char *>(out.data()), out.size());
-            return s.find(std::to_string(num) + " 0 obj", tailStart);
+            const std::string needle = "\n" + std::to_string(num) + " 0 obj";
+            return s.find(needle, tailStart) + 1;
         };
         appendEntry(sigObj, objAt(sigObj));
         appendEntry(fieldObj, objAt(fieldObj));
@@ -578,14 +585,16 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
         if (newCat)
             appendEntry(catObj, objAt(catObj));
         if (cfg.visible)
-            appendEntry(pageObj, objAt(pageObj));
+            appendEntry(pageRef, objAt(pageRef));
         if (cfg.visible)
             appendEntry(apObj, objAt(apObj));
 
         appendStr(out, "\n"); // keyword delimiter before xref
         const std::size_t xrefPos = out.size();
         appendStr(out, xref);
-        std::string trailer = "<< /Size " + std::to_string(sizeObj) +
+        std::string trailer = "<< /Size " +
+                              std::to_string(doc.maxObj + (cfg.visible ? 6
+                                            : newCat ? 5 : 4)) +
                               " /Root " +
                               std::to_string(newCat ? catObj : doc.rootRef) + " 0 R" +
                               " /Prev " + std::to_string(doc.xrefOffset) + " >>";
@@ -605,7 +614,13 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
         }
         const std::size_t X = hexStart;
         const std::size_t Y = hexStart + sigHexLen;
-        if (Y >= out.size()) {
+        // canonical PAdES layout: the gap between the two ranges must contain
+        // the whole /Contents hex-string value INCLUDING its < and >
+        // delimiters, so the first signed range ends before "<" and the second
+        // starts right after ">"
+        const std::size_t xBeg = hexStart - 1;
+        const std::size_t yEnd = hexStart + sigHexLen + 1;
+        if (Y >= out.size() || yEnd >= out.size()) {
             res.error = "layout PDF non valido";
             return res;
         }
@@ -626,12 +641,12 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
             // /ByteRange [low1 len1 low2 len2]: first range = [0, X),
             // second range = [Y, end-of-file) so the signature hex string
             // (between X and Y) is excluded from the signed content.
-            putRange(brPos + 23, X);
-            putRange(brPos + 34, Y);
-            putRange(brPos + 45, out.size() - Y);
+            putRange(brPos + 23, xBeg);
+            putRange(brPos + 34, yEnd);
+            putRange(brPos + 45, out.size() - yEnd);
         }
-        const std::vector<unsigned char> content(out.begin(), out.begin() + X);
-        const std::vector<unsigned char> content2(out.begin() + Y, out.end());
+        const std::vector<unsigned char> content(out.begin(), out.begin() + xBeg);
+        const std::vector<unsigned char> content2(out.begin() + yEnd, out.end());
 
         CmsConfig ccfg;
         ccfg.signerCertDer = cfg.signerCert.der;

@@ -660,6 +660,11 @@ void MainWindow::onSignFinished(int kind, bool ok, const QString &error,
 {
     hideProgress();
 
+    if (kind == Pkcs11Worker::SignParams::Pades)
+        m_p11Pin->clear();
+    else
+        m_p7mPin->clear();
+
     if (kind == Pkcs11Worker::SignParams::Pades) {
         const QString out = m_pdfOutput->text().trimmed();
         if (!ok) {
@@ -955,9 +960,7 @@ void MainWindow::saveOriginalFile()
                "disponibile solo se la firma è valida."));
         return;
     }
-    QString suggested = QFileInfo(m_verifyP7m->text()).fileName();
-    if (suggested.endsWith(".p7m", Qt::CaseInsensitive))
-        suggested.chop(5);
+    QString suggested = QFileInfo(m_verifyP7m->text()).completeBaseName();
     if (suggested.isEmpty())
         suggested = "originale.bin";
     const QString path = QFileDialog::getSaveFileName(
