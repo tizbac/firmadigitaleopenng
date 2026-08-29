@@ -354,7 +354,14 @@ bool loadDoc(const std::vector<unsigned char> &pdf, PdfDoc &doc, std::string &er
 
 std::string pdfName(const X509Cert &c)
 {
-    // extract the CN component from the subject string
+    if (!c.givenName.empty() || !c.surname.empty()) {
+        std::string n = c.givenName;
+        if (!n.empty() && !c.surname.empty())
+            n += " ";
+        n += c.surname;
+        return n;
+    }
+    // fallback: extract the CN component from the subject string
     const std::string &s = c.subject;
     auto pos = s.find("CN=");
     if (pos == std::string::npos)
@@ -378,15 +385,6 @@ std::string escapePdfText(const std::string &s)
     return out;
 }
 
-std::string formatStampTime(std::time_t t)
-{
-    std::tm tm{};
-    gmtime_r(&t, &tm);
-    char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
-    return buf;
-}
-
 std::string pdfDateTime(std::time_t t)
 {
     std::tm tm{};
@@ -401,7 +399,63 @@ std::string pdfDateTime(std::time_t t)
     return std::string(buf) + tz;
 }
 
+// PDF requires a '.' decimal point regardless of the process locale
+std::string locNum(double v, int prec)
+{
+    char b[64];
+    std::snprintf(b, sizeof(b), "%.*f", prec, v);
+    std::string s(b);
+    for (char &c : s)
+        if (c == ',')
+            c = '.';
+    return s;
+}
+
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Visible-stamp layout (shared with the GUI preview)
+// ---------------------------------------------------------------------------
+
+double stampFontSize(const std::string &line1, const std::string &line2,
+                     double boxW, double maxFont)
+{
+    constexpr double kMinFont = 6.0;
+    const double maxLen = std::max<double>(line1.size(), line2.size());
+    if (maxLen <= 0 || boxW <= 8.0)
+        return kMinFont;
+    return std::max(kMinFont, std::min(maxFont, (boxW - 8.0) / (0.5 * maxLen)));
+}
+
+StampBox stampFitBox(const std::string &line1, const std::string &line2,
+                     double maxFont)
+{
+    const double maxLen = std::max<double>(line1.size(), line2.size());
+    StampBox b;
+    b.w = 12.0 + (0.5 * maxLen) * maxFont;
+    b.h = 6.0 + 2.2 * maxFont + 8.0;
+    return b;
+}
+
+StampLayout stampLayout(const std::string &line1, const std::string &line2,
+                        double boxW, double boxH, double maxFont)
+{
+    StampLayout l;
+    l.fs = stampFontSize(line1, line2, boxW, maxFont);
+    l.y1 = boxH - 6.0 - l.fs;
+    l.y2 = boxH - 6.0 - 2.2 * l.fs;
+    l.left = 4.0;
+    return l;
+}
+
+std::string stampTimeString(std::time_t t)
+{
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+    return buf;
+}
 
 // ---------------------------------------------------------------------------
 // Pades::sign
@@ -428,6 +482,7 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
     const bool newCat = !doc.hasAcroForm;
     const int catObj = doc.maxObj + 4;
     const int apObj = doc.maxObj + 5;
+    const int visObj = doc.maxObj + 6;
 
     const std::string name =
         cfg.signerName.empty() ? pdfName(cfg.signerCert) : cfg.signerName;
@@ -462,20 +517,14 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
             const double w = cfg.boxX2 - cfg.boxX1;
             const double h = cfg.boxY2 - cfg.boxY1;
             const std::string line1 = cfg.visibleText + " : " + name;
-            const std::string line2 = "Time: " + formatStampTime(std::time(nullptr));
-            const double maxLen =
-                static_cast<double>(line1.size() > line2.size() ? line1.size()
-                                                                 : line2.size());
-            // Helvetica average glyph width ~ 0.5 em
-            const double fs =
-                std::min(12.0, (w - 8.0) / (0.5 * maxLen));
-            const std::string fsStr = std::to_string(fs).substr(0, 6);
-            char y1[32], y2[32];
-            std::snprintf(y1, sizeof(y1), "%.1f", h - 6.0 - fs);
-            std::snprintf(y2, sizeof(y2), "%.1f", h - 6.0 - 2.2 * fs);
-            char wStr[32], hStr[32];
-            std::snprintf(wStr, sizeof(wStr), "%.1f", w);
-            std::snprintf(hStr, sizeof(hStr), "%.1f", h);
+            const std::string line2 =
+                "Time: " + stampTimeString(std::time(nullptr));
+            const StampLayout sl = stampLayout(line1, line2, w, h, cfg.maxFont);
+            const std::string fsStr = locNum(sl.fs, 6).substr(0, 6);
+            const std::string y1 = locNum(sl.y1, 1);
+            const std::string y2 = locNum(sl.y2, 1);
+            const std::string wStr = locNum(w, 1);
+            const std::string hStr = locNum(h, 1);
             appearanceStream_ =
                 "BT\n/F1 " + fsStr + " Tf\n1 0 0 1 4 " + y1 + " Tm\n(" +
                 escapePdfText(line1) +
@@ -486,9 +535,9 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
                         escapePdfText(cfg.fieldName) + ") /V " +
                         std::to_string(sigObj) + " 0 R /P " +
                         std::to_string(pageRef) + " 0 R\n   /Rect [" +
-                        std::to_string(cfg.boxX1) + " " + std::to_string(cfg.boxY1) +
-                        " " + std::to_string(cfg.boxX2) + " " +
-                        std::to_string(cfg.boxY2) +
+                        locNum(cfg.boxX1, 6) + " " + locNum(cfg.boxY1, 6) +
+                        " " + locNum(cfg.boxX2, 6) + " " +
+                        locNum(cfg.boxY2, 6) +
                         "] /F 4 /AP << /N " + std::to_string(apObj) +
                         " 0 R >> >>";
         } else {
@@ -552,6 +601,77 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
             }
         }
 
+        // --- visible signature: stamp the appearance directly in the page
+        //     content stream too, so every renderer shows it even when
+        //     annotations are hidden ---
+        std::string visStream;
+        bool overlayActive = false;
+        if (cfg.visible) {
+            std::size_t rOff = 0;
+            const bool hasRes = findKey(pageDict, "/Resources", rOff);
+            const bool inlineRes = hasRes && rOff + 1 < pageDict.size() &&
+                                   pageDict[rOff] == '<' && pageDict[rOff + 1] == '<';
+            if (inlineRes) {
+                // scan the resources value (starts with "<<" at rOff); depth 1
+                // means the resources closing ">>" is reached
+                std::size_t i = rOff + 2, depth = 1;
+                for (; i + 1 < pageDict.size() && depth; ++i) {
+                    if (pageDict[i] == '<' && pageDict[i + 1] == '<') { ++depth; ++i; }
+                    else if (pageDict[i] == '>' && pageDict[i + 1] == '>') { --depth; ++i; }
+                }
+                if (!depth) {
+                    // endRes = index of the first '>' of the resources closing '>>'
+                    const std::size_t endRes = i - 2;
+                    const std::size_t xop = pageDict.find("/XObject", rOff);
+                    if (xop != std::string::npos && xop < endRes) {
+                        std::size_t so = xop + 8;
+                        while (so < endRes &&
+                               std::isspace(static_cast<unsigned char>(pageDict[so])))
+                            ++so;
+                        if (so + 1 < endRes && pageDict[so] == '<' && pageDict[so + 1] == '<') {
+                            std::size_t j = so + 2, d2 = 1;
+                            for (; j + 1 <= endRes && d2; ++j) {
+                                if (pageDict[j] == '<' && pageDict[j + 1] == '<') { ++d2; ++j; }
+                                else if (pageDict[j] == '>' && pageDict[j + 1] == '>') { --d2; ++j; }
+                            }
+                            if (!d2)
+                                pageDict.insert(j - 2, ("/VisSig " + std::to_string(apObj) + " 0 R ").c_str());
+                        }
+                    } else {
+                        pageDict.insert(endRes, (" /XObject << /VisSig " + std::to_string(apObj) + " 0 R >>").c_str());
+                    }
+                    // prepend the form onto the page content stream
+                    std::size_t cOff = 0;
+                    if (!findKey(pageDict, "/Contents", cOff) && pageDict.size() >= 2)
+                        cOff = std::string::npos;
+                    if (cOff != std::string::npos && cOff < pageDict.size() && pageDict[cOff] == '[') {
+                        const std::size_t cc = pageDict.find(']', cOff);
+                        if (cc != std::string::npos)
+                            pageDict.insert(cc, (" " + std::to_string(visObj) + " 0 R").c_str());
+                    } else if (cOff != std::string::npos && cOff < pageDict.size()) {
+                        int cnum = 0;
+                        if (parseRef(pageDict, cOff, cnum)) {
+                            const std::size_t rr = pageDict.find(" 0 R", cOff);
+                            if (rr != std::string::npos && rr + 4 < pageDict.size()) {
+                                const std::string origRef = pageDict.substr(cOff, rr + 4 - cOff);
+                                pageDict.replace(cOff, rr + 4 - cOff,
+                                                 "[" + origRef + " " + std::to_string(visObj) + " 0 R]");
+                            }
+                        }
+                    } else if (pageDict.size() >= 2 && pageDict.compare(pageDict.size() - 2, 2, ">>") == 0) {
+                        pageDict.replace(pageDict.size() - 2, 2,
+                                         (" /Contents [" + std::to_string(visObj) + " 0 R] >>").c_str());
+                    }
+                    char vsl[96];
+                    std::snprintf(vsl, sizeof(vsl), "q 1 0 0 1 %s %s cm /VisSig Do Q",
+                                  locNum(cfg.boxX1, 1).c_str(),
+                                  locNum(cfg.boxY1, 1).c_str());
+                    visStream = vsl;
+                    overlayActive = true;
+                }
+            }
+        }
+
         // --- assemble ---
         out = doc.pdf;
         auto appendObj = [&](int num, const std::string &body) {
@@ -577,6 +697,13 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
                 std::to_string(apStream.size()) + " >>\nstream\n" + apStream +
                 "endstream";
             appendObj(apObj, apDict);
+            if (overlayActive) {
+                const std::string vs = visStream + "\n";
+                const std::string visDict =
+                    "<< /Length " + std::to_string(vs.size()) + " >>\nstream\n" + vs +
+                    "endstream";
+                appendObj(visObj, visDict);
+            }
         }
 
         // --- xref + trailer ---
@@ -604,12 +731,15 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
             appendEntry(pageRef, objAt(pageRef));
         if (cfg.visible)
             appendEntry(apObj, objAt(apObj));
+        if (overlayActive)
+            appendEntry(visObj, objAt(visObj));
 
         appendStr(out, "\n"); // keyword delimiter before xref
         const std::size_t xrefPos = out.size();
         appendStr(out, xref);
         std::string trailer = "<< /Size " +
-                              std::to_string(doc.maxObj + (cfg.visible ? 6
+                              std::to_string(doc.maxObj + (cfg.visible
+                                            ? (overlayActive ? 7 : 6)
                                             : newCat ? 5 : 4)) +
                               " /Root " +
                               std::to_string(newCat ? catObj : doc.rootRef) + " 0 R" +

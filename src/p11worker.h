@@ -30,6 +30,7 @@ public:
         bool visible = false;
         std::string visibleText;
         double boxX1 = 0, boxY1 = 0, boxX2 = 0, boxY2 = 0;
+        double stampMaxFont = 12.0;
         // P7M
         QString p7mIn;
         QString p7mOut;

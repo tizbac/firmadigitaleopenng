@@ -98,6 +98,15 @@ std::unique_ptr<X509Cert> X509Cert::fromDer(const std::vector<unsigned char> &de
     cert->der = derIn;
     cert->derSha256Hex = X509Util::sha256Hex(derIn);
     cert->subject = nameOneline(X509_get_subject_name(x));
+    char nmBuf[1024];
+    int nLen = X509_NAME_get_text_by_NID(X509_get_subject_name(x), NID_givenName,
+                                         nmBuf, sizeof(nmBuf));
+    if (nLen > 0)
+        cert->givenName.assign(nmBuf, static_cast<size_t>(nLen));
+    nLen = X509_NAME_get_text_by_NID(X509_get_subject_name(x), NID_surname,
+                                     nmBuf, sizeof(nmBuf));
+    if (nLen > 0)
+        cert->surname.assign(nmBuf, static_cast<size_t>(nLen));
     cert->issuer = nameOneline(X509_get_issuer_name(x));
     cert->serialHex = serialHexOf(x);
     cert->notBefore = timePrint(X509_get0_notBefore(x));

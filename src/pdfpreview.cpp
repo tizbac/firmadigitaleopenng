@@ -4,7 +4,12 @@
 #include <QMouseEvent>
 #include <QScrollBar>
 
+#include <algorithm>
+#include <ctime>
+
 #include <poppler/qt6/poppler-qt6.h>
+
+#include "pades.h"
 
 namespace fdo {
 
@@ -22,6 +27,11 @@ PdfPreview::~PdfPreview() = default;
 int PdfPreview::pageCount() const
 {
     return m_doc ? m_doc->numPages() : 0;
+}
+
+QSizeF PdfPreview::pageSize() const
+{
+    return QSizeF(m_pageW, m_pageH);
 }
 
 bool PdfPreview::loadPdf(const QString &path, int page, QString *error)
@@ -47,6 +57,13 @@ void PdfPreview::setPage(int i)
     clearBox();
     renderPage();
     emit pageChanged(m_page);
+}
+
+void PdfPreview::setStampInfo(const QString &visibleText, const QString &signerName)
+{
+    m_stampText = visibleText;
+    m_stampName = signerName;
+    update();
 }
 
 void PdfPreview::clearBox()
@@ -106,23 +123,42 @@ void PdfPreview::paintEvent(QPaintEvent *)
     {
         p.drawImage(0, 0, m_image);
 
-        // Permanent signature box (green).
+        // Signature stamp preview: what Pades::sign will render.
         if (m_hasBox) {
             const QPointF tl = pdfToScreen(m_boxX1, m_boxY2); // left, top
             const QPointF br = pdfToScreen(m_boxX2, m_boxY1); // right, bottom
             QRectF r(qMin(tl.x(), br.x()), qMin(tl.y(), br.y()),
                      qAbs(br.x() - tl.x()), qAbs(br.y() - tl.y()));
-            p.setPen(QPen(QColor(0, 160, 0), 2));
-            p.setBrush(Qt::NoBrush);
-            p.drawRect(r);
-        }
 
-        // In-progress drag rectangle (red).
-        if (m_dragging) {
-            QRectF r = QRectF(m_dragStart, m_dragCur).normalized();
-            p.setPen(QPen(QColor(220, 0, 0), 2, Qt::DashLine));
-            p.setBrush(QColor(220, 0, 0, 40));
+            const std::string name = m_stampName.toStdString();
+            const std::string line1 =
+                m_stampText.toStdString() + " : " + name;
+            const std::string line2 =
+                "Time: " + stampTimeString(std::time(nullptr));
+            const StampLayout sl =
+                stampLayout(line1, line2, m_boxX2 - m_boxX1, m_boxY2 - m_boxY1,
+                            m_maxFont);
+
+            p.setPen(QPen(QColor(0, 160, 0), 2));
+            p.fillRect(r, QColor(255, 255, 255, 230));
             p.drawRect(r);
+
+            QFont font;
+            font.setFamily(QStringLiteral("Helvetica"));
+            font.setPixelSize(qMax(4, qRound(sl.fs * m_zoom)));
+            p.setFont(font);
+            p.setPen(QColor(20, 20, 20));
+
+            // drawText uses the top-left of the text; emulate the baseline.
+            const double ascent = 0.75 * sl.fs * m_zoom;
+            const QPointF b1 =
+                pdfToScreen(m_boxX1 + sl.left, m_boxY1 + sl.y1);
+            const QPointF b2 =
+                pdfToScreen(m_boxX1 + sl.left, m_boxY1 + sl.y2);
+            p.drawText(QPointF(b1.x(), b1.y() - ascent),
+                       QString::fromStdString(line1));
+            p.drawText(QPointF(b2.x(), b2.y() - ascent),
+                       QString::fromStdString(line2));
         }
     }
 }
@@ -131,41 +167,32 @@ void PdfPreview::mousePressEvent(QMouseEvent *e)
 {
     if (e->button() != Qt::LeftButton || m_image.isNull())
         return;
-    m_dragging = true;
-    m_dragStart = e->position();
-    m_dragCur = m_dragStart;
-    update();
+    placeStampAt(screenToPdf(e->position().x(), e->position().y()));
 }
 
-void PdfPreview::mouseMoveEvent(QMouseEvent *e)
+void PdfPreview::placeStampAt(const QPointF &pdfPos)
 {
-    if (!m_dragging)
-        return;
-    m_dragCur = e->position();
-    update();
-}
+    const std::string name = m_stampName.toStdString();
+    const std::string line1 = m_stampText.toStdString() + " : " + name;
+    const std::string line2 = "Time: " + stampTimeString(std::time(nullptr));
+    const StampBox fit = stampFitBox(line1, line2, m_maxFont);
 
-void PdfPreview::mouseReleaseEvent(QMouseEvent *e)
-{
-    if (e->button() != Qt::LeftButton || !m_dragging)
-        return;
-    m_dragging = false;
-    m_dragCur = e->position();
+    double w = fit.w;
+    double h = fit.h;
+    if (m_pageW > 24)
+        w = std::min(w, m_pageW - 24.0);
+    if (m_pageH > 24)
+        h = std::min(h, m_pageH - 24.0);
 
-    const QRectF screen = QRectF(m_dragStart, m_dragCur).normalized();
-    // Ignore trivial clicks.
-    if (screen.width() < 4 || screen.height() < 4) {
-        update();
-        return;
-    }
+    double x1 = pdfPos.x() - w / 2.0;
+    double y1 = pdfPos.y() - h / 2.0;
+    x1 = std::max(0.0, std::min(x1, m_pageW - w));
+    y1 = std::max(0.0, std::min(y1, m_pageH - h));
 
-    // Convert to PDF points (bottom-left origin).
-    const QPointF tl = screenToPdf(screen.left(), screen.top());
-    const QPointF br = screenToPdf(screen.right(), screen.bottom());
-    m_boxX1 = tl.x();
-    m_boxX2 = br.x();
-    m_boxY2 = tl.y(); // top (larger PDF y)
-    m_boxY1 = br.y(); // bottom (smaller PDF y)
+    m_boxX1 = x1;
+    m_boxY1 = y1;
+    m_boxX2 = x1 + w;
+    m_boxY2 = y1 + h;
     m_hasBox = true;
     update();
     emit boxChanged(true);

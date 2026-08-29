@@ -12,6 +12,8 @@ struct X509Cert
 {
     std::vector<unsigned char> der;
     std::string subject;   // "C=IT, O=..., CN=..."
+    std::string givenName; // GN (2.5.4.42), may be empty
+    std::string surname;   // SN (2.5.4.4), may be empty
     std::string issuer;
     std::string serialHex;
     std::string notBefore; // "YYYY-MM-DD HH:MM:SS" UTC

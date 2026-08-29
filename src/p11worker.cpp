@@ -67,6 +67,7 @@ void Pkcs11Worker::sign(const SignParams &params)
         cfg.onPage = params.page;
         cfg.visible = params.visible;
         cfg.visibleText = params.visibleText;
+        cfg.maxFont = params.stampMaxFont;
         if (params.visible) {
             cfg.boxX1 = params.boxX1;
             cfg.boxY1 = params.boxY1;

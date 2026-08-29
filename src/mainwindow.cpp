@@ -33,6 +33,10 @@
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
+#include <QSettings>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
 
 #include <algorithm>
 #include <map>
@@ -70,6 +74,46 @@ bool writeFileBytes(const QString &path, const std::vector<unsigned char> &bytes
 // Official Italian TSL from the AgID eIDAS Digital Service list.
 const char kTslUrl[] = "https://eidas.agid.gov.it/TL/TSL-IT.xml";
 
+QString lastUsedDir()
+{
+    return QSettings().value(QStringLiteral("lastDir")).toString();
+}
+
+void recordUsedDir(const QString &path)
+{
+    if (path.isEmpty())
+        return;
+    QSettings s;
+    s.setValue(QStringLiteral("lastDir"), QFileInfo(path).absolutePath());
+}
+
+QString cnFromSubject(const std::string &subject)
+{
+    const std::string key = "CN=";
+    std::string::size_type pos = subject.find(key);
+    if (pos == std::string::npos)
+        return QString();
+    pos += key.size();
+    std::string::size_type end = subject.find(',', pos);
+    if (end == std::string::npos)
+        end = subject.size();
+    return QString::fromStdString(subject.substr(pos, end - pos)).trimmed();
+}
+
+QString stampSignerName(const fdo::Pkcs11Slot &slot)
+{
+    const QString gn = QString::fromStdString(slot.certGivenName).trimmed();
+    const QString sn = QString::fromStdString(slot.certSurname).trimmed();
+    if (!gn.isEmpty() || !sn.isEmpty()) {
+        if (gn.isEmpty())
+            return sn;
+        if (sn.isEmpty())
+            return gn;
+        return gn + " " + sn;
+    }
+    return cnFromSubject(slot.certSubject);
+}
+
 } // namespace
 
 struct MainWindow::TslResolution {
@@ -93,6 +137,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_tabs->addTab(buildP7mTab(), tr("Firma File (P7M / CAdES)"));
     m_tabs->addTab(buildVerifyTab(), tr("Verifica Firma (P7M)"));
     setCentralWidget(m_tabs);
+    setAcceptDrops(true);
 
     // PKCS#11 worker: slot enumeration and signing run on a dedicated
     // thread because real tokens take seconds per C_* call (PIN entry on
@@ -198,13 +243,26 @@ QWidget *MainWindow::buildPadesTab()
     line->setFrameShadow(QFrame::Sunken);
     lv->addWidget(line);
 
-    m_visible = new QCheckBox(tr("Firma visibile (disegna sul documento)"));
+    m_visible = new QCheckBox(tr("Firma visibile (clicca sul documento per posizionarla)"));
     m_visible->setChecked(true);
     lv->addWidget(m_visible);
 
     lv->addWidget(new QLabel(tr("Prefisso firma:")));
     m_visibleText = new QLineEdit("Firmato digitalmente da ");
     lv->addWidget(m_visibleText);
+
+    lv->addWidget(new QLabel(tr("Dimensione testo firma (pt):")));
+    m_stampFont = new QSpinBox;
+    m_stampFont->setRange(6, 72);
+    m_stampFont->setSuffix(tr(" pt"));
+    m_stampFont->setValue(QSettings().value(QStringLiteral("stampFont"), 12).toInt());
+    connect(m_stampFont, qOverload<int>(&QSpinBox::valueChanged), this,
+            [this](int v) {
+                QSettings().setValue(QStringLiteral("stampFont"), v);
+                if (m_preview)
+                    m_preview->setStampFont(double(v));
+            });
+    lv->addWidget(m_stampFont);
 
     lv->addWidget(new QLabel(tr("Pagina (da 0):")));
     m_page = new QSpinBox;
@@ -223,6 +281,7 @@ QWidget *MainWindow::buildPadesTab()
 
     // Right: PDF preview in a scroll area
     m_preview = new fdo::PdfPreview;
+    m_preview->setStampFont(double(m_stampFont->value()));
     auto *scroll = new QScrollArea;
     scroll->setWidget(m_preview);
     scroll->setWidgetResizable(false);
@@ -244,8 +303,15 @@ QWidget *MainWindow::buildPadesTab()
             [this](int) {});
     connect(m_page, qOverload<int>(&QSpinBox::valueChanged), m_preview,
             &fdo::PdfPreview::setPage);
+    connect(m_visibleText, &QLineEdit::textChanged, this,
+            [this](const QString &text) {
+                m_preview->setStampInfo(
+                    text, stampSignerName(selectedSlot(m_p11Slot, m_p11Slots)));
+            });
+    m_preview->setStampInfo(m_visibleText->text(),
+                            stampSignerName(selectedSlot(m_p11Slot, m_p11Slots)));
 
-    m_boxLabel = new QLabel(tr("Nessun riquadro firma selezionato"));
+    m_boxLabel = new QLabel(tr("Clicca sul documento per posizionare la firma visibile"));
 
     auto *rv = new QVBoxLayout;
     rv->addWidget(scroll, 1);
@@ -475,6 +541,11 @@ void MainWindow::onSlotsEnumerated(int gen, const std::vector<fdo::Pkcs11Slot> &
             ++it;
         }
     }
+    if (m_preview) {
+        m_preview->setStampInfo(
+            m_visibleText->text(),
+            stampSignerName(selectedSlot(m_p11Slot, m_p11Slots)));
+    }
 }
 
 void MainWindow::showProgress(const QString &text)
@@ -510,15 +581,13 @@ fdo::Pkcs11Slot MainWindow::selectedSlot(QComboBox *box,
     return {};
 }
 
-void MainWindow::browsePdfInput()
+void MainWindow::loadFileInput(const QString &path)
 {
-    const QString path = QFileDialog::getOpenFileName(
-        this, tr("Seleziona PDF"), QString(), tr("PDF files (*.pdf);;Tutti (*.*)"));
-    if (path.isEmpty())
-        return;
     m_pdfInput->setText(path);
-    const QString base = QFileInfo(path).completeBaseName();
-    m_pdfOutput->setText(base + "_signed.pdf");
+    const QFileInfo fi(path);
+    m_pdfOutput->setText(
+        fi.absolutePath() + "/" + fi.completeBaseName() + "_signed.pdf");
+    recordUsedDir(path);
     QString err;
     if (m_preview->loadPdf(path, m_page->value(), &err))
         m_pdfStatus->setText(tr("PDF caricato: %1 pagine").arg(m_preview->pageCount()));
@@ -526,32 +595,54 @@ void MainWindow::browsePdfInput()
         m_pdfStatus->setText(tr("Errore anteprima: %1").arg(err));
 }
 
+void MainWindow::browsePdfInput()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Seleziona PDF"), lastUsedDir(),
+        tr("PDF files (*.pdf);;Tutti (*.*)"));
+    if (path.isEmpty())
+        return;
+    loadFileInput(path);
+}
+
 void MainWindow::browsePdfOutput()
 {
+    const QString start = m_pdfOutput->text().isEmpty()
+                              ? lastUsedDir()
+                              : m_pdfOutput->text();
     const QString path = QFileDialog::getSaveFileName(
-        this, tr("Salva PDF firmato"), m_pdfOutput->text(),
+        this, tr("Salva PDF firmato"), start,
         tr("PDF files (*.pdf);;Tutti (*.*)"));
-    if (!path.isEmpty())
+    if (!path.isEmpty()) {
         m_pdfOutput->setText(path);
+        recordUsedDir(path);
+    }
 }
 
 void MainWindow::browseFileInput()
 {
     const QString path =
-        QFileDialog::getOpenFileName(this, tr("Seleziona file"), QString());
+        QFileDialog::getOpenFileName(this, tr("Seleziona file"), lastUsedDir());
     if (path.isEmpty())
         return;
     m_fileInput->setText(path);
-    m_fileOutput->setText(QFileInfo(path).fileName() + ".p7m");
+    const QFileInfo fi(path);
+    m_fileOutput->setText(fi.absolutePath() + "/" + fi.fileName() + ".p7m");
+    recordUsedDir(path);
 }
 
 void MainWindow::browseFileOutput()
 {
+    const QString start = m_fileOutput->text().isEmpty()
+                              ? lastUsedDir()
+                              : m_fileOutput->text();
     const QString path = QFileDialog::getSaveFileName(
-        this, tr("Salva .p7m"), m_fileOutput->text(),
+        this, tr("Salva .p7m"), start,
         tr("P7M files (*.p7m);;Tutti (*.*)"));
-    if (!path.isEmpty())
+    if (!path.isEmpty()) {
         m_fileOutput->setText(path);
+        recordUsedDir(path);
+    }
 }
 
 void MainWindow::browseP11Lib()
@@ -603,13 +694,42 @@ void MainWindow::signPdf()
     p.pdfData = QByteArray(reinterpret_cast<const char *>(pdfBytes.data()),
                            static_cast<int>(pdfBytes.size()));
     p.page = m_page->value();
-    p.visible = m_visible->isChecked() && m_preview->hasBox();
+    p.visible = m_visible->isChecked();
     p.visibleText = m_visibleText->text().toStdString();
+    p.stampMaxFont = double(m_stampFont->value());
     if (p.visible) {
-        p.boxX1 = m_preview->boxX1();
-        p.boxY1 = m_preview->boxY1();
-        p.boxX2 = m_preview->boxX2();
-        p.boxY2 = m_preview->boxY2();
+        if (m_preview->hasBox()) {
+            p.boxX1 = m_preview->boxX1();
+            p.boxY1 = m_preview->boxY1();
+            p.boxX2 = m_preview->boxX2();
+            p.boxY2 = m_preview->boxY2();
+        } else {
+            const QSizeF ps = m_preview->pageSize();
+            if (ps.width() > 24.0 && ps.height() > 24.0) {
+                const std::string name =
+                    stampSignerName(selectedSlot(m_p11Slot, m_p11Slots))
+                        .toStdString();
+                const std::string line1 = p.visibleText + " : " + name;
+                const std::string line2 =
+                    "Time: " + fdo::stampTimeString(std::time(nullptr));
+                const fdo::StampBox fit =
+                    fdo::stampFitBox(line1, line2, p.stampMaxFont);
+                const double w = std::min(fit.w, ps.width() - 24.0);
+                const double h = std::min(fit.h, ps.height() - 24.0);
+                p.boxX2 = ps.width() - 24.0;
+                p.boxX1 = p.boxX2 - w;
+                p.boxY2 = ps.height() - 24.0;
+                p.boxY1 = p.boxY2 - h;
+            } else {
+                p.boxX1 = 50.0;
+                p.boxY1 = 50.0;
+                p.boxX2 = 250.0;
+                p.boxY2 = 100.0;
+            }
+            m_boxLabel->setText(tr("Nessuna posizione scelta: firma in alto a "
+                                   "destra (clicca sul documento per "
+                                   "posizionarla)"));
+        }
     }
 
     m_pdfStatus->setText(tr("Firma in corso..."));
@@ -698,21 +818,24 @@ void MainWindow::onSignFinished(int kind, bool ok, const QString &error,
 void MainWindow::browseVerifyP7m()
 {
     const QString path = QFileDialog::getOpenFileName(
-        this, tr("Seleziona un file firmato"), QString(),
+        this, tr("Seleziona un file firmato"), lastUsedDir(),
         tr("File firmati (*.pdf *.p7m);;PDF (*.pdf);;P7M (*.p7m);;Tutti (*.*)"));
     if (path.isEmpty())
         return;
     m_verifyP7m->setText(path);
+    recordUsedDir(path);
     verifyP7m();
 }
 
 void MainWindow::browseVerifyTsl()
 {
     const QString path = QFileDialog::getOpenFileName(
-        this, tr("Seleziona TSL (XML)"), QString(),
+        this, tr("Seleziona TSL (XML)"), lastUsedDir(),
         tr("TSL XML (*.xml);;Tutti (*.*)"));
-    if (!path.isEmpty())
+    if (!path.isEmpty()) {
         m_verifyTsl->setText(path);
+        recordUsedDir(path);
+    }
 }
 
 QString MainWindow::cachedTslPath() const
@@ -960,13 +1083,18 @@ void MainWindow::saveOriginalFile()
                "disponibile solo se la firma è valida."));
         return;
     }
-    QString suggested = QFileInfo(m_verifyP7m->text()).completeBaseName();
-    if (suggested.isEmpty())
-        suggested = "originale.bin";
+    QString suggested = lastUsedDir();
+    QString name = QFileInfo(m_verifyP7m->text()).completeBaseName();
+    if (name.isEmpty())
+        name = "originale.bin";
+    if (!suggested.isEmpty())
+        suggested += "/";
+    suggested += name;
     const QString path = QFileDialog::getSaveFileName(
         this, tr("Salva file originale (non firmato)"), suggested, tr("Tutti (*.*)"));
     if (path.isEmpty())
         return;
+    recordUsedDir(path);
     std::string err;
     if (!writeFileBytes(path, m_verifyContent, err)) {
         QMessageBox::critical(this, tr("Errore"), QString::fromStdString(err));
@@ -980,6 +1108,53 @@ void MainWindow::openFileForVerify(const QString &path)
     m_tabs->setCurrentIndex(2);
     m_verifyP7m->setText(path);
     verifyP7m();
+}
+
+void MainWindow::loadVerifyFile(const QString &path)
+{
+    m_verifyP7m->setText(path);
+    verifyP7m();
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (event->mimeData()->hasUrls())
+        event->acceptProposedAction();
+    else
+        event->ignore();
+}
+
+void MainWindow::dropEvent(QDropEvent *event)
+{
+    const QList<QUrl> urls = event->mimeData()->urls();
+    if (urls.isEmpty()) {
+        event->ignore();
+        return;
+    }
+    const QString path = urls.first().toLocalFile();
+    if (path.isEmpty()) {
+        event->ignore();
+        return;
+    }
+    event->acceptProposedAction();
+    switch (m_tabs->currentIndex()) {
+    case 0: // Firma PDF
+        if (path.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive))
+            loadFileInput(path);
+        break;
+    case 1: { // Firma File (P7M)
+        m_fileInput->setText(path);
+        const QFileInfo fi(path);
+        m_fileOutput->setText(fi.absolutePath() + "/" + fi.fileName() + ".p7m");
+        recordUsedDir(path);
+        break;
+    }
+    case 2: // Verifica
+        loadVerifyFile(path);
+        break;
+    default:
+        break;
+    }
 }
 
 QString MainWindow::verifyReportText() const

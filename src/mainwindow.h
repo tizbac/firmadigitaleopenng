@@ -21,6 +21,8 @@ class QThread;
 class QTimer;
 class QProgressDialog;
 class QUrl;
+class QDragEnterEvent;
+class QDropEvent;
 
 namespace fdo {
 class PdfPreview;
@@ -61,6 +63,10 @@ private slots:
                         const QByteArray &pdfOut);
     void issuePendingSlotQueries();
 
+protected:
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
+
 signals:
     void p11EnumerateRequested(const QString &libPath, int gen);
     void p11SignRequested(const Pkcs11Worker::SignParams &params);
@@ -85,6 +91,8 @@ private:
     fdo::Pkcs11Slot selectedSlot(QComboBox *box,
                                  const std::vector<fdo::Pkcs11Slot> &store) const;
     QString defaultP11Lib() const;
+    void loadFileInput(const QString &path);
+    void loadVerifyFile(const QString &path);
     void showProgress(const QString &text);
     void hideProgress();
 
@@ -105,6 +113,7 @@ private:
     QCheckBox *m_visible = nullptr;
     QLineEdit *m_visibleText = nullptr;
     QSpinBox *m_page = nullptr;
+    QSpinBox *m_stampFont = nullptr;
     QPushButton *m_signPdf = nullptr;
     QLabel *m_pdfStatus = nullptr;
     fdo::PdfPreview *m_preview = nullptr;
