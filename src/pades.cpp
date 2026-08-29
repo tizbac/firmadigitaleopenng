@@ -387,6 +387,20 @@ std::string formatStampTime(std::time_t t)
     return buf;
 }
 
+std::string pdfDateTime(std::time_t t)
+{
+    std::tm tm{};
+    localtime_r(&t, &tm);
+    char buf[40];
+    std::strftime(buf, sizeof(buf), "D:%Y%m%d%H%M%S", &tm);
+    int offMin = static_cast<int>((mktime(&tm) - timegm(&tm)) / 60);
+    char sign = offMin < 0 ? '-' : '+';
+    int a = offMin < 0 ? -offMin : offMin;
+    char tz[16];
+    std::snprintf(tz, sizeof(tz), "%c%02d'%02d'", sign, a / 60, a % 60);
+    return std::string(buf) + tz;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -438,7 +452,9 @@ PadesResult Pades::sign(const PadesConfig &cfg, const SignFunction &sign)
             "   /ByteRange [0000000000 0000000000 0000000000 0000000000]\n"
             "   /Contents <" + std::string(sigHexLen, '0') + ">";
         sigDict += " /Length " + std::to_string(sigHexLen / 2) +
-                   " /Name (" + escapePdfText(name) + ") >>";
+                   " /Name (" + escapePdfText(name) +
+                   ") /M (" + pdfDateTime(std::time(nullptr)) +
+                   ") /Location () /Reason () /ContactInfo () >>";
 
         // --- field / widget ---
         std::string fieldDict;

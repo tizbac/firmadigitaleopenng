@@ -83,7 +83,9 @@ std::vector<unsigned char> CmsSigner::buildSignedAttrs(const CmsConfig &cfg,
             *error = "certificato firmatario non valido (DER)";
         return {};
     }
-    // DER requires SET OF members sorted by their full TLV encoding
+    // DER (X.690 11.6) and BC's SignerInformation.verify() re-encode the
+    // SET OF in ascending order of the full DER encodings of the members.
+    // Sorting the full TLVs yields exactly that canonical order.
     std::vector<Bytes> attrs{ attrContentType(cfg),
                               attrSigningTime(cfg.signingTime
                                                   ? cfg.signingTime
