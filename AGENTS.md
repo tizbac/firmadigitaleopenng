@@ -45,8 +45,7 @@ cmake --build build-deb -j && cpack --config build-deb/CPackConfig.cmake
 ## Packaging — Arch Linux (PKGBUILD)
 
 - Repo-root `PKGBUILD` (1.0.0) + `firmadigitaleopen.install` script sharing `resources/firmadigitaleopen.desktop`/`.svg` and the same CMake install rules. Arch runtime deps: `qt6-base poppler-qt6 openssl libxml2` (Qt6 is monolithic there — no separate network/sql packages).
-- The proprietary Bit4id `.so` is bundled into the package only when present at tarball time (`tar` no longer excludes it); without it CMake's bundle guard still builds and packages, minus the token module. Tests are NOT run by makepkg (`check()` absent): the ctest suites need untracked fixture data (e.g. `tests/data/test.pdf`) that git doesn't ship — use the Dockerfile for a full build+test.
-- Source tarball is made from a local checkout (no remotes): `tar --exclude=.git --exclude=build --exclude=build-* --exclude='*.deb' --exclude='_CPack_Packages' -czf firmadigitaleopen-1.0.0.tar.gz .` (gitignored). `firmadigitaleopen.install` refreshes desktop+mime DBs in `post_install`/`post_upgrade`/`post_remove`.
+- `makepkg` sources straight from the git remote configured in `.git/config` (`git+ssh://git@git.tizbac.ovh/tiziano/firmadigitaleopencpp.git`). The proprietary Bit4id `.so` is committed, so the clone ships it and CMake bundles it; without it CMake's bundle guard still builds and packages, minus the token module. Tests are NOT run by makepkg (`check()` absent): the ctest suites need untracked fixture data (e.g. `tests/data/test.pdf`) that git doesn't ship — use the Dockerfile for a full build+test. `firmadigitaleopen.install` refreshes desktop+mime DBs in `post_install`/`post_upgrade`/`post_remove`.
 
 ## PKCS#11 quirks (do not "fix")
 

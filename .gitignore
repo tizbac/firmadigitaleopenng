@@ -231,6 +231,11 @@ _CPack_Packages/
 # Arch Linux source tarballs (built locally for makepkg)
 firmadigitaleopen-*.tar.gz
 
+# Arch Linux makepkg artifacts (srcdir clone + staged package)
+pkg/
+src/firmadigitaleopencpp/
+firmadigitaleopen-*.pkg.tar.zst
+
 # The proprietary Bit4id PKCS#11 module is deliberately tracked: it ships in the
 # produced packages, so keep it next to the repo. (Overrides the global *.so.)
 !libbit4xpki.so
