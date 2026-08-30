@@ -150,9 +150,9 @@ set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
 set(CPACK_GENERATOR "DEB")
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "FirmaDigitaleOpen <firmadigitaleopen@example.invalid>")
 set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
-set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
-set(CPACK_DEBIAN_PACKAGE_DEPENDS
-    "libqt6widgets6, libqt6network6, libqt6sql6, libpoppler-qt6-6, libssl3, libxml2")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+#set(CPACK_DEBIAN_PACKAGE_DEPENDS
+#    "libqt6widgets6, libqt6network6, libqt6sql6, libpoppler-qt6-6, libssl3, libxml2")
 if (NOT CPACK_DEBIAN_PACKAGE_ARCHITECTURE)
     if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
         set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "arm64")
