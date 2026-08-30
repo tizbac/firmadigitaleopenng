@@ -1,0 +1,77 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Debian package
+        run: |
+          docker build --target package -t fdo-pkg .
+          mkdir -p dist
+          docker run --rm -v "$PWD/dist:/out" fdo-pkg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debs
+          path: dist/*.deb
+          if-no-files-found: error
+
+  rpm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Fedora RPM
+        run: |
+          docker build --target rpm-pkg -t fdo-rpm .
+          mkdir -p dist
+          docker run --rm -v "$PWD/dist:/out" fdo-rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpms
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  appimage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build AppImage
+        run: |
+          docker build --target appimage -t fdo-appimage .
+          mkdir -p dist
+          docker run --rm -v "$PWD/dist:/out" fdo-appimage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimages
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  release:
+    needs: [deb, rpm, appimage]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

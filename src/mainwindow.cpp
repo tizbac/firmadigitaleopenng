@@ -445,6 +445,10 @@ QString MainWindow::defaultP11Lib() const
 {
     const QStringList candidates = {
         QString::fromLocal8Bit(qgetenv("FDO_PKCS11_LIB")),
+        // AppImage: the module bundle lives inside the mounted AppDir
+        // (triple is multiarch: <libdir>/firmadigitaleopen/).
+        QString::fromLocal8Bit(qgetenv("APPDIR")) + "/usr/lib/x86_64-linux-gnu/firmadigitaleopen/libbit4xpki.so",
+        QString::fromLocal8Bit(qgetenv("APPDIR")) + "/usr/lib/firmadigitaleopen/libbit4xpki.so",
         // Bundled with the installed package (Debian): <libdir>/firmadigitaleopen/
         "/usr/lib/x86_64-linux-gnu/firmadigitaleopen/libbit4xpki.so",
         "/usr/lib/firmadigitaleopen/libbit4xpki.so",

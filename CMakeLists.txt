@@ -166,4 +166,25 @@ set(CPACK_PACKAGE_FILE_NAME
 # association (MimeType in the .desktop file) takes effect immediately.
 set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
     "${CMAKE_CURRENT_SOURCE_DIR}/packaging/postinst")
+# --- RPM (Fedora) ------------------------------------------------------------#
+# Used when packaging with `cpack -G RPM` (see the Dockerfile fedora stage);
+# harmless when building the .deb.
+set(CPACK_RPM_PACKAGE_NAME "firmadigitaleopen")
+set(CPACK_RPM_PACKAGE_SUMMARY "${CPACK_PACKAGE_DESCRIPTION_SUMMARY}")
+set(CPACK_RPM_PACKAGE_LICENSE "GPL-3.0-only")
+set(CPACK_RPM_PACKAGE_VENDOR "${CPACK_PACKAGE_VENDOR}")
+set(CPACK_RPM_PACKAGE_AUTOREQPROV OFF)
+set(CPACK_RPM_PACKAGE_RELEASE "1")
+set(CPACK_RPM_PACKAGE_REQUIRES "qt6-qtbase, poppler-qt6, openssl-libs, libxml2")
+set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE
+    "${CMAKE_CURRENT_SOURCE_DIR}/packaging/post-rpm.sh")
+if (NOT CPACK_RPM_PACKAGE_ARCHITECTURE)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+        set(CPACK_RPM_PACKAGE_ARCHITECTURE "x86_64")
+    else()
+        set(CPACK_RPM_PACKAGE_ARCHITECTURE "aarch64")
+    endif()
+endif()
+set(CPACK_RPM_FILE_NAME
+    "${CPACK_RPM_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CPACK_RPM_PACKAGE_RELEASE}.${CPACK_RPM_PACKAGE_ARCHITECTURE}.rpm")
 include(CPack)

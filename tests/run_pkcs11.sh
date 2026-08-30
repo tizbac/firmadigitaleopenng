@@ -32,6 +32,7 @@ find_softhsm_lib() {
         /usr/lib/softhsm/libsofthsm2.so \
         /usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so \
         /usr/lib64/softhsm/libsofthsm2.so \
+        /usr/lib64/pkcs11/libsofthsm2.so \
         /usr/local/lib/softhsm/libsofthsm2.so; do
         [ -e "$c" ] && { printf '%s\n' "$c"; return 0; }
     done
