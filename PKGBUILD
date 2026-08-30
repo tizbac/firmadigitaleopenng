@@ -14,8 +14,8 @@ pkgname=firmadigitaleopen
 pkgver=1.0.0
 pkgrel=1
 pkgdesc="Firma digitale PAdES (PDF) e P7M con token PKCS#11"
-arch=('x86_64' 'aarch64')
-url="https://example.invalid/firmadigitaleopen"
+arch=('x86_64')
+url="https://github.com/tizbac/firmadigitaleopenng"
 license=('custom')
 depends=('qt6-base' 'poppler-qt6' 'openssl' 'libxml2')
 makedepends=('cmake' 'ninja' 'git')
@@ -23,7 +23,7 @@ makedepends=('cmake' 'ninja' 'git')
 # (C_Initialize fails with CKR_GENERAL_ERROR). Never strip this module.
 options=('!strip')
 install=firmadigitaleopen.install
-source=("git+ssh://git@git.tizbac.ovh/tiziano/firmadigitaleopencpp.git")
+source=("git+https://github.com/tizbac/firmadigitaleopenng.git")
 md5sums=('SKIP')
 
 build() {
