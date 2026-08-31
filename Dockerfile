@@ -35,7 +35,6 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         libxml2-devel \
         softhsm \
         opensc \
-        file \
     && dnf clean all
 
 # ------------------------------------------------------------ rpm: test ----
@@ -78,6 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxml2-dev \
         softhsm2 \
         opensc \
+        file \
     && rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------------ test ----
