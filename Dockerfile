@@ -35,6 +35,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         libxml2-devel \
         softhsm \
         opensc \
+        file \
     && dnf clean all
 
 # ------------------------------------------------------------ rpm: test ----
