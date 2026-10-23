@@ -66,6 +66,29 @@ bool isElement(const xmlNode *n, const char *name, const char *ns)
            n->ns && std::strcmp(reinterpret_cast<const char *>(n->ns->href), ns) == 0;
 }
 
+bool endsWith(const std::string &s, const char *suffix)
+{
+    const std::size_t n = std::strlen(suffix);
+    return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
+}
+
+// ETSI service status values that mean the service is currently usable.
+bool isTrustedServiceStatus(const std::string &status)
+{
+    return endsWith(status, "/granted") ||
+           endsWith(status, "/recognisedatnationallevel") ||
+           endsWith(status, "/accredited");
+}
+
+// Only CA services may act as trust anchors for document signatures; a
+// timestamping/seal/identity service certificate must not validate a PDF/P7M
+// signature.
+bool isCaServiceType(const std::string &type)
+{
+    return type.find("/CA/") != std::string::npos ||
+           type.find("/NationalRootCA") != std::string::npos;
+}
+
 // Days since 1970-01-01 for a proleptic Gregorian date (Hinnant algorithm).
 long long daysFromCivil(int y, int m, int d)
 {
@@ -203,10 +226,24 @@ void parseServices(const xmlNode *root, Tsl &tsl)
                             s.serviceName = descendantText(n2);
                         if (const xmlNode *st = childByName(info, "ServiceStatus", kNsTsl))
                             s.serviceStatus = textOf(st);
-                        if (const xmlNode *di = childByName(info, "ServiceDigitalIdentity", kNsTsl))
-                            if (const xmlNode *id = childByName(di, "DigitalId", kNsTsl))
-                                if (const xmlNode *cert = childByName(id, "X509Certificate"))
-                                    s.certDer = base64Decode(textOf(cert));
+                        if (const xmlNode *di = childByName(info, "ServiceDigitalIdentity", kNsTsl)) {
+                            for (const xmlNode *id = di->children; id; id = id->next) {
+                                if (!isElement(id, "DigitalId", kNsTsl))
+                                    continue;
+                                for (const xmlNode *cert = id->children; cert;
+                                     cert = cert->next) {
+                                    if (cert->type != XML_ELEMENT_NODE ||
+                                        std::strcmp(reinterpret_cast<const char *>(cert->name),
+                                                    "X509Certificate") != 0)
+                                        continue;
+                                    auto der = base64Decode(textOf(cert));
+                                    if (!der.empty())
+                                        s.certs.push_back(std::move(der));
+                                }
+                            }
+                            if (!s.certs.empty())
+                                s.certDer = s.certs.front();
+                        }
                     }
                     tsl.services.push_back(std::move(s));
                 }
@@ -316,6 +353,17 @@ std::unique_ptr<Tsl> TslParser::parseFile(const std::string &path)
     parseServices(root, *tsl);
     parseSignature(root, *tsl);
     return tsl;
+}
+
+std::vector<std::vector<unsigned char>> Tsl::trustAnchors() const
+{
+    std::vector<std::vector<unsigned char>> out;
+    for (const TslService &s : services) {
+        if (!isTrustedServiceStatus(s.serviceStatus) || !isCaServiceType(s.serviceTypeIdentifier))
+            continue;
+        out.insert(out.end(), s.certs.begin(), s.certs.end());
+    }
+    return out;
 }
 
 bool Tsl::upToDate(std::time_t now) const

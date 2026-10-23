@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "timecompat.h"
+
 namespace fdo {
 namespace der {
 
@@ -130,11 +132,7 @@ Bytes nullValue() { return tlv(0x05, {}); }
 Bytes utcTime(std::time_t t)
 {
     std::tm tmUtc{};
-#if defined(_WIN32)
-    gmtime_s(&tmUtc, &t);
-#else
-    gmtime_r(&t, &tmUtc);
-#endif
+    gmtimeSafe(t, tmUtc);
     char buf[32];
     if (tmUtc.tm_year + 1900 >= 2050) {
         std::snprintf(buf, sizeof(buf), "%04d%02d%02d%02d%02d%02dZ", tmUtc.tm_year + 1900,

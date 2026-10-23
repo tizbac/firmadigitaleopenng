@@ -1,6 +1,7 @@
 #include "tslparser.h"
 #include "tslverifier.h"
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 
@@ -31,6 +32,15 @@ int main(int argc, char **argv)
     expect(tsl->hasSignature, "has XML-DSig signature");
     expect(tsl->keyInfoCerts.size() == 1, "one KeyInfo certificate");
     expect(tsl->references.size() == 2, "two ds:Reference entries");
+    expect(!tsl->trustAnchors().empty(),
+           "real TSL yields CA trust anchors (granted/recognised/accredited)");
+    {
+        const auto anchors = tsl->trustAnchors();
+        expect(tsl->keyInfoCerts.size() != 1 ||
+                   std::find(anchors.begin(), anchors.end(),
+                             tsl->keyInfoCerts.front()) == anchors.end(),
+               "TSL XML-signature certificate is not a trust anchor");
+    }
 
     const fdo::TslVerification v = fdo::TslVerifier::verify(*tsl);
     expect(v.refWholeDoc, "ref1 digest (whole doc excl. ds:Signature)");
@@ -82,6 +92,61 @@ int main(int argc, char **argv)
         auto undated = build("2026-08-30T10:00:00Z", "not-a-date");
         expect(undated && !undated->upToDate(std::time(nullptr)),
                "unparseable NextUpdate is not up to date");
+    }
+
+    // Trust anchors: only certificates of currently valid CA services count.
+    // The TSL signature certificate, withdrawn services and non-CA services
+    // must never be used to validate a document signature.
+    {
+        auto service = [](const char *status, const char *type, const char *cert) {
+            return std::string("<TSPService><ServiceInformation>"
+                               "<ServiceTypeIdentifier>") + type +
+                   "</ServiceTypeIdentifier><ServiceName><Name xml:lang=\"en\">x</Name>"
+                   "</ServiceName><ServiceStatus>" + status +
+                   "</ServiceStatus><ServiceDigitalIdentity><DigitalId>"
+                   "<X509Certificate>" + cert + "</X509Certificate>"
+                   "</DigitalId></ServiceDigitalIdentity></ServiceInformation></TSPService>";
+        };
+        const std::string base =
+            "<TrustServiceStatusList xmlns=\"http://uri.etsi.org/02231/v2#\" "
+            "xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\">"
+            "<SchemeInformation><ListIssueDateTime>2026-08-01T00:00:00Z"
+            "</ListIssueDateTime><NextUpdate><dateTime>2099-01-01T00:00:00Z"
+            "</dateTime></NextUpdate></SchemeInformation>"
+            "<TrustServiceProviderList><TrustServiceProvider><TSPServices>";
+        const std::string end =
+            "</TSPServices></TrustServiceProvider></TrustServiceProviderList>"
+            "<ds:Signature><ds:KeyInfo><ds:X509Data><ds:X509Certificate>"
+            "R0hJ</ds:X509Certificate></ds:X509Data></ds:KeyInfo></ds:Signature>"
+            "</TrustServiceStatusList>";
+        const std::string xml =
+            base +
+            service("http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/granted",
+                    "http://uri.etsi.org/TrstSvc/Svctype/CA/QC", "QUJD") +
+            service("http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/withdrawn",
+                    "http://uri.etsi.org/TrstSvc/Svctype/CA/QC", "REVG") +
+            service("http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/granted",
+                    "http://uri.etsi.org/TrstSvc/Svctype/TSA/TSS-QC", "SktM") +
+            end;
+        auto t = fdo::TslParser::parseXml(xml);
+        expect(t != nullptr, "synthetic TSL parsed");
+        expect(t && t->allCerts.size() == 4, "synthetic TSL has 4 certificates");
+        expect(t && t->trustAnchors().size() == 1,
+               "only the granted CA service is a trust anchor");
+        expect(t && t->trustAnchors().size() == 1 &&
+                   t->trustAnchors().front() ==
+                       std::vector<unsigned char>{'A', 'B', 'C'},
+               "trust anchor is the granted CA certificate (not KeyInfo/withdrawn/TSA)");
+        auto anchorsEmpty = fdo::TslParser::parseXml(
+            "<TrustServiceStatusList xmlns=\"http://uri.etsi.org/02231/v2#\">"
+            "<SchemeInformation><ListIssueDateTime>2026-08-01T00:00:00Z"
+            "</ListIssueDateTime><NextUpdate><dateTime>2099-01-01T00:00:00Z"
+            "</dateTime></NextUpdate></SchemeInformation>"
+            "<TrustServiceProviderList><TrustServiceProvider><TSPServices>"
+            "</TSPServices></TrustServiceProvider></TrustServiceProviderList>"
+            "</TrustServiceStatusList>");
+        expect(anchorsEmpty && anchorsEmpty->trustAnchors().empty(),
+               "TSL without services yields no trust anchors");
     }
 
     if (failures) {

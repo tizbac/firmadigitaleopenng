@@ -23,8 +23,23 @@ tested; the Qt GUI sits on top of it.
   signed attributes, re-tagged to the PDF spec layout).
 - **P7M** detached CMS signing and verification.
 - **TSL** parser + verifier (Italian/EU Trusted Lists).
-- **PKCS#11** token layer: thin `dlopen` wrapper (no system PKCS#11 headers
-  required) that enumerates slots, logs in, finds the signer key/cert by
+- **Windows x64 build** (MinGW cross-compile in Docker) with a self-contained
+  NSIS installer that bundles Qt, poppler, OpenSSL and the Bit4id PKCS#11
+  module.
+
+## Trust model
+
+Signature verification is TSL-only and fails closed. Trust anchors are the CA
+certificates of services that are currently `granted`,
+`recognisedatnationallevel` or `accredited` in the selected/cached TSL. The
+TSL's own XML-signature certificate (`ds:KeyInfo`), withdrawn/ceased services
+and non-CA services (TSA, eSeal, identity) are never used as anchors. Without an
+up-to-date TSL — explicit file, fresh cache, or successful auto-download — no
+signed PDF/P7M is reported valid. The core verifier additionally rejects an
+empty anchor set before validating the chain, so there is no self-anchored
+fallback.
+- **PKCS#11** token layer: thin `dlopen`/`LoadLibraryW` wrapper (no system PKCS#11
+  headers required) that enumerates slots, logs in, finds the signer key/cert by
   `CKA_ID "DS3"`, and signs.
 - Canonical XML (C14N) helpers.
 
@@ -54,6 +69,52 @@ Outputs:
 - `build/firmadigitaleopen` — the Qt GUI
 - `build/fdo_core` — the static crypto/PKCS#11 library
 - `build/tst_*` — test executables
+
+## Windows build (64-bit)
+
+The Windows GUI is cross-compiled with MinGW-w64 in Docker and packaged with a
+native NSIS installer. The result is a self-contained x64 application: Qt,
+poppler, OpenSSL, libxml2 and the MinGW runtime are all bundled, so nothing
+needs to be installed on the target machine.
+
+```bash
+docker build --target win-package -t fdo-win .
+docker run --rm -v "$PWD:/out" fdo-win
+# -> firmadigitaleopen-<version>-win64-setup.exe
+```
+
+What the Docker stages do:
+
+- Fedora 44 `mingw64-*` packages provide the cross toolchain, Qt 6.11,
+  poppler-qt6, OpenSSL 3 and libxml2; `cmake/toolchain-mingw64.cmake` points
+  CMake at that sysroot.
+- `packaging/windows/deploy.sh` walks the PE import tables of the executable
+  and of every plugin, copies each non-system DLL from the sysroot and the
+  required Qt plugins (`platforms`, `styles`, `tls`, `sqldrivers`,
+  `networkinformation`) next to the executable — the same result as
+  `windeployqt`, which Fedora's cross Qt does not ship.
+- A Debian stage runs `makensis` (native Linux NSIS, no Wine) on
+  `packaging/windows/installer.nsi`.
+
+The installer installs under `%ProgramFiles%\FirmaDigitaleOpen`, creates Start
+Menu and desktop shortcuts, registers `.pdf` under *Open with* and claims
+`.p7m` when it has no owner, and ships an uninstaller. The executable is built
+as a GUI app (`-mwindows`) with icon and VERSIONINFO resource.
+
+The Bit4id PKCS#11 module is bundled: `bit4xpki.dll` is Bit4id's official
+**x86-64** module taken from the Bit4id Universal Middleware kit (module
+version 1.4.11.1228, installer 11.861), together with `bit4xpki.dll.conf` and
+`bit4xpki.dll.rc/*.lic`. Those files must always sit in the same directory as
+the executable (the module reads them from there). If the module is absent the
+build still succeeds and, at run time, the app falls back to a machine-wide
+Bit4id install (`%SystemRoot%\System32\bit4xpki.dll`) or OpenSC.
+
+Windows tests are not run for now: the ctest suites are POSIX-only and are
+driven by `tests/run_pkcs11.sh`; the Windows build is compile-checked by the
+`windows` GitHub Actions workflow.
+
+The installer and executable are not code-signed, so Windows SmartScreen may
+show a warning on first run.
 
 ## Run the tests
 
@@ -181,6 +242,8 @@ tests/
    tst_pkcs11.cpp + run_pkcs11.sh   PKCS#11 test + module auto-selection
    tst_guisign.cpp                  headless GUI + signing-path test
    data/                            fixtures (TSL, sample PDF, etc.)
+cmake/toolchain-mingw64.cmake        Windows x64 cross toolchain (Fedora mingw64)
+packaging/windows/                   NSIS installer + runtime DLL deployment
 ```
 
 ## Status

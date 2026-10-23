@@ -443,6 +443,33 @@ QWidget *MainWindow::buildVerifyTab()
 
 QString MainWindow::defaultP11Lib() const
 {
+#ifdef Q_OS_WIN
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString winDir = QString::fromLocal8Bit(qgetenv("SystemRoot"));
+    const QString pf86 = QString::fromLocal8Bit(qgetenv("ProgramFiles(x86)"));
+    const QString pf = QString::fromLocal8Bit(qgetenv("ProgramFiles"));
+    const QStringList candidates = {
+        QString::fromLocal8Bit(qgetenv("FDO_PKCS11_LIB")),
+        // Bundled next to the executable (NSIS installer): both the name we
+        // ship and Bit4id's own Windows module name are accepted.
+        appDir + "/libbit4xpki.dll",
+        appDir + "/bit4xpki.dll",
+        // Machine-wide Bit4id middleware installs.
+        winDir + "/System32/bit4xpki.dll",
+        winDir + "/System32/libbit4xpki.dll",
+        pf86 + "/Bit4Id/Universal MW/etc/bit4xpki.dll",
+        pf + "/Bit4Id/Universal MW/etc/bit4xpki.dll",
+        // OpenSC is handy for testing with non-Bit4id tokens.
+        winDir + "/System32/opensc-pkcs11.dll",
+        // Bare names: LoadLibraryW also searches PATH and the app directory.
+        "bit4xpki.dll",
+        "libbit4xpki.dll",
+    };
+    for (const QString &c : candidates)
+        if (!c.isEmpty() && QFileInfo::exists(c))
+            return c;
+    return appDir + "/bit4xpki.dll";
+#else
     const QStringList candidates = {
         QString::fromLocal8Bit(qgetenv("FDO_PKCS11_LIB")),
         // AppImage: the module bundle lives inside the mounted AppDir
@@ -462,6 +489,7 @@ QString MainWindow::defaultP11Lib() const
         if (!c.isEmpty() && QFileInfo::exists(c))
             return c;
     return "../libbit4xpki.so";
+#endif
 }
 
 void MainWindow::detectSlots(QLineEdit *libEdit, QComboBox *slotBox,
@@ -896,9 +924,9 @@ void MainWindow::refreshTsl()
                                  .arg(cache));
         return;
     }
-    m_verifyStatus->setText(tr("TSL aggiornata: %1 (%2 certificati)")
+    m_verifyStatus->setText(tr("TSL aggiornata: %1 (%2 certificati di fiducia)")
                                 .arg(QString::fromStdString(tsl->issueDateTime))
-                                .arg(tsl->allCerts.size()));
+                                .arg(tsl->trustAnchors().size()));
 }
 
 MainWindow::TslResolution MainWindow::resolveTsl(bool allowDownload)
@@ -907,7 +935,10 @@ MainWindow::TslResolution MainWindow::resolveTsl(bool allowDownload)
     const QString tslPath = m_verifyTsl->text().trimmed();
 
     const auto takeCerts = [&res](const fdo::Tsl &tsl) {
-        for (const auto &der : tsl.allCerts) {
+        // Only CA certificates of currently valid services listed in the TSL
+        // become trust anchors. The document's own certificates and the TSL
+        // XML-signature certificate are never used.
+        for (const auto &der : tsl.trustAnchors()) {
             auto c = fdo::X509Cert::fromDer(der);
             if (c) {
                 res.certs.push_back(std::move(c));

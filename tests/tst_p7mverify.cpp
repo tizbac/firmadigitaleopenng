@@ -222,10 +222,18 @@ int main(int argc, char **argv)
         CHECK(!r4.ok, std::string("wrong anchor rejected (") + r4.error + ")");
     }
 
+    std::printf("== 5) no TSL anchors must fail (no self-anchoring) ==\n");
+    {
+        std::vector<const X509Cert *> noAnchors;
+        P7MResult r5 = P7M::decodeAndVerify(p7mBytes, noAnchors);
+        CHECK(!r5.ok, std::string("verify without TSL anchors rejected (") +
+                          r5.error + ")");
+    }
+
     int rc = g_failures == 0 ? 0 : 1;
 
     if (argc >= 3) {
-        std::printf("== 5) sample p7m against the AgID TSL ==\n");
+        std::printf("== 6) sample p7m against the AgID TSL ==\n");
         auto tsl = TslParser::parseFile(dataDir + "/TSL-IT.xml");
         if (!tsl) {
             std::printf("  FAIL cannot parse TSL\n");
@@ -233,14 +241,14 @@ int main(int argc, char **argv)
         }
         std::vector<const X509Cert *> tslAnchors;
         std::vector<std::unique_ptr<X509Cert>> tslCerts;
-        for (const auto &c : tsl->allCerts) {
+        for (const auto &c : tsl->trustAnchors()) {
             auto x = X509Cert::fromDer(c);
             if (x) {
                 tslCerts.push_back(std::move(x));
                 tslAnchors.push_back(tslCerts.back().get());
             }
         }
-        std::printf("        TSL certs loaded: %zu\n", tslAnchors.size());
+        std::printf("        TSL trust anchors loaded: %zu\n", tslAnchors.size());
         const std::vector<unsigned char> sample = readFile(argv[2]);
         P7MResult rs = P7M::decodeAndVerify(sample, tslAnchors);
         CHECK(rs.ok, std::string("sample p7m verified (err: ") + rs.error + ")");

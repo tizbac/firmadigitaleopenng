@@ -1,7 +1,14 @@
 #include "pkcs11.h"
 #include "x509util.h"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -12,17 +19,82 @@ namespace fdo {
 
 using namespace p11;
 
+namespace {
+
+// Thin portable dynamic-library loader: dlopen/dlsym on POSIX, LoadLibraryW/
+// GetProcAddress on Windows. Paths are UTF-8 on both platforms.
+#ifdef _WIN32
+std::wstring utf8ToWide(const std::string &s)
+{
+    if (s.empty())
+        return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                      nullptr, 0);
+    std::wstring w(static_cast<std::size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+void *openLibrary(const std::string &path, std::string *error)
+{
+    const std::wstring wide = utf8ToWide(path);
+    HMODULE handle = LoadLibraryW(wide.c_str());
+    if (!handle && error) {
+        const DWORD code = GetLastError();
+        char *msg = nullptr;
+        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                           FORMAT_MESSAGE_IGNORE_INSERTS,
+                       nullptr, code, 0, reinterpret_cast<char *>(&msg), 0, nullptr);
+        std::string text = msg ? msg : "unknown error";
+        LocalFree(msg);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
+            text.pop_back();
+        *error = "LoadLibrary: " + text;
+    }
+    return handle;
+}
+
+void *librarySymbol(void *handle, const char *name)
+{
+    return reinterpret_cast<void *>(
+        GetProcAddress(static_cast<HMODULE>(handle), name));
+}
+
+void closeLibrary(void *handle)
+{
+    if (handle)
+        FreeLibrary(static_cast<HMODULE>(handle));
+}
+#else
+void *openLibrary(const std::string &path, std::string *error)
+{
+    void *handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!handle && error)
+        *error = std::string("dlopen: ") + dlerror();
+    return handle;
+}
+
+void *librarySymbol(void *handle, const char *name)
+{
+    return dlsym(handle, name);
+}
+
+void closeLibrary(void *handle)
+{
+    if (handle)
+        dlclose(handle);
+}
+#endif
+
+} // namespace
+
 bool loadFnTable(FnTable &t, const std::string &path, std::string *error)
 {
-    t.handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    t.handle = openLibrary(path, error);
     if (!t.handle) {
-        if (error)
-            *error = std::string("dlopen: ") + dlerror();
         return false;
     }
-    auto sym = [&](const char *name) {
-        return reinterpret_cast<void *>(dlsym(t.handle, name));
-    };
+    auto sym = [&](const char *name) { return librarySymbol(t.handle, name); };
     t.C_Initialize = reinterpret_cast<C_Initialize_t>(sym("C_Initialize"));
     t.C_Finalize = reinterpret_cast<C_Finalize_t>(sym("C_Finalize"));
     t.C_GetSlotList = reinterpret_cast<C_GetSlotList_t>(sym("C_GetSlotList"));
@@ -43,7 +115,7 @@ bool loadFnTable(FnTable &t, const std::string &path, std::string *error)
         !t.C_SignInit || !t.C_Sign) {
         if (error)
             *error = "PKCS#11 library is missing required C_* functions";
-        dlclose(t.handle);
+        closeLibrary(t.handle);
         t.handle = nullptr;
         return false;
     }
@@ -65,7 +137,7 @@ void Pkcs11::close()
     if (m_fn) {
         m_fn->C_Finalize(nullptr);
         if (m_fn->handle)
-            dlclose(m_fn->handle);
+            closeLibrary(m_fn->handle);
         m_fn.reset();
     }
     m_signer.reset();
@@ -286,7 +358,7 @@ std::vector<Pkcs11Slot> Pkcs11::enumerateSlots(const std::string &libPath,
     if (t.C_Initialize(nullptr) != CKR_OK) {
         if (error)
             *error = "C_Initialize failed";
-        dlclose(t.handle);
+        closeLibrary(t.handle);
         return out;
     }
 
@@ -372,7 +444,7 @@ std::vector<Pkcs11Slot> Pkcs11::enumerateSlots(const std::string &libPath,
         }
     }
     t.C_Finalize(nullptr);
-    dlclose(t.handle);
+    closeLibrary(t.handle);
     return out;
 }
 

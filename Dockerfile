@@ -1,6 +1,7 @@
 # Multi-stage build/test/package image for FirmaDigitaleOpenCpp.
 #
-# Two independent toolchains, pick the target explicitly:
+# Two independent Linux toolchains plus a Windows cross toolchain, pick the
+# target explicitly:
 #   Debian (trixie) — default target:
 #     docker build --target test -t fdo-test .     # configure + build + full ctest
 #     docker build -t fdo-pkg .                    # ...plus build the .deb with cpack
@@ -9,9 +10,12 @@
 #     docker build --target rpm-test -t fdo-rpm-test .  # configure + build + full ctest
 #     docker build --target rpm-pkg -t fdo-rpm .        # ...plus build the .rpm
 #     docker run --rm -v "$PWD:/out" fdo-rpm            # drop firmadigitaleopen-*.rpm into CWD
+#   Fedora (44) — Windows x64 installer (MinGW cross build + NSIS):
+#     docker build --target win-package -t fdo-win .
+#     docker run --rm -v "$PWD:/out" fdo-win            # drop the *-win64-setup.exe into CWD
 #
-# The packages reproduce genuine distributions (Debian: Qt 6.8, OpenSSL 3.5,
-# poppler-qt6; Fedora: Qt 6.x, OpenSSL 3.x) with SoftHSM2 + OpenSC so the
+# The Linux packages reproduce genuine distributions (Debian: Qt 6.8, OpenSSL
+# 3.5, poppler-qt6; Fedora: Qt 6.x, OpenSSL 3.x) with SoftHSM2 + OpenSC so the
 # PKCS#11 suite runs the real emulated-token path. The proprietary
 # libbit4xpki.so is bundled when present next to the repo (it is part of the
 # build context, like on the host); when absent the package is produced
@@ -123,6 +127,71 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget file \
 VOLUME /out
 WORKDIR /out
 ENTRYPOINT ["sh", "-c", "cp /src/*.AppImage /out/ && ls -l /out/"]
+
+# --------------------------------------------------------- windows: build ----
+# Cross-compiles the 64-bit Windows GUI with Fedora's mingw64 toolchain.
+# Qt6, poppler-qt6, OpenSSL and libxml2 come from the mingw64 sysroot.
+# packaging/windows/deploy.sh then copies the complete non-system DLL closure
+# and the required Qt plugins next to the executable (the equivalent of
+# windeployqt, which Fedora's cross Qt does not ship).
+FROM fedora:44 AS win-base
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        cmake \
+        ninja-build \
+        binutils \
+        mingw64-gcc-c++ \
+        mingw64-qt6-qtbase \
+        mingw64-poppler-qt6 \
+        mingw64-openssl \
+        mingw64-libxml2 \
+    && dnf clean all
+
+FROM win-base AS win-build
+
+WORKDIR /src
+COPY . /src
+
+RUN set -eux; \
+    sed -n 's/^project(FirmaDigitaleOpenCpp VERSION \([0-9][0-9.]*\).*/\1/p' \
+        /src/CMakeLists.txt > /version; \
+    test -s /version; \
+    cmake -S /src -B /build -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchain-mingw64.cmake \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/app; \
+    cmake --build /build; \
+    cmake --install /build; \
+    bash /src/packaging/windows/deploy.sh /app
+
+# ------------------------------------------------------- windows: package ----
+# Native NSIS on Debian builds the Windows installer (no Wine needed); the
+# staged application directory is copied from the Fedora cross-build stage.
+FROM debian:trixie-slim AS win-package
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        nsis \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=win-build /app /app
+COPY --from=win-build /version /version
+COPY resources/firmadigitaleopen.ico /packaging/firmadigitaleopen.ico
+COPY packaging/windows/installer.nsi /packaging/installer.nsi
+
+RUN set -eux; \
+    mkdir -p /dist; \
+    VERSION="$(cat /version)"; \
+    makensis -V2 \
+        -DAPP_VERSION="$VERSION" \
+        -DSOURCE_DIR=/app \
+        -DICON_FILE=/packaging/firmadigitaleopen.ico \
+        -DOUT_FILE="/dist/firmadigitaleopen-${VERSION}-win64-setup.exe" \
+        /packaging/installer.nsi
+
+VOLUME /out
+WORKDIR /out
+ENTRYPOINT ["sh", "-c", "cp /dist/*.exe /out/ && ls -l /out/"]
 
 # -------------------------------------------------------------- package ----
 FROM test AS package

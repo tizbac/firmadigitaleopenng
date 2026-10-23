@@ -253,6 +253,48 @@ int main(int argc, char **argv)
         }
         std::printf("OK: verify via cached fixture TSL -> valid\n");
 
+        // A TSL that only carries the CA as its own ds:KeyInfo certificate or
+        // as a withdrawn service must not provide any trust anchor: the GUI
+        // has to refuse the signature again.
+        const std::string badTslXml =
+            "<TrustServiceStatusList xmlns=\"http://uri.etsi.org/02231/v2#\" "
+            "xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\">"
+            "<SchemeInformation>"
+            "<TSLVersionIdentifier>1</TSLVersionIdentifier>"
+            "<TSLSequenceNumber>1</TSLSequenceNumber>"
+            "<ListIssueDateTime>2026-08-01T00:00:00Z</ListIssueDateTime>"
+            "<NextUpdate><dateTime>2099-01-01T00:00:00Z</dateTime></NextUpdate>"
+            "</SchemeInformation>"
+            "<TrustServiceProviderList><TrustServiceProvider><TSPInformation>"
+            "<TSPName>FDO</TSPName>"
+            "</TSPInformation><TSPServices><TSPService><ServiceInformation>"
+            "<ServiceTypeIdentifier>http://uri.etsi.org/TrstSvc/Svctype/CA/QC"
+            "</ServiceTypeIdentifier>"
+            "<ServiceName><Name xml:lang=\"it\">FDO</Name></ServiceName>"
+            "<ServiceStatus>http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/"
+            "withdrawn</ServiceStatus>"
+            "<ServiceDigitalIdentity><DigitalId><X509Certificate>" + b64 +
+            "</X509Certificate></DigitalId></ServiceDigitalIdentity>"
+            "</ServiceInformation></TSPService></TSPServices>"
+            "</TrustServiceProvider></TrustServiceProviderList>"
+            "<ds:Signature><ds:KeyInfo><ds:X509Data><ds:X509Certificate>" + b64 +
+            "</ds:X509Certificate></ds:X509Data></ds:KeyInfo></ds:Signature>"
+            "</TrustServiceStatusList>";
+        writeAll(work + "/TSL-IT.xml",
+                 { badTslXml.begin(), badTslXml.end() });
+        w.openFileForVerify(sample);
+        report = w.verifyReportText();
+        if (!report.contains("FIRMA NON VALIDA") || !report.contains("TSL")) {
+            std::fprintf(stderr,
+                         "FAIL: withdrawn/KeyInfo-only TSL must be rejected, report:\n%s\n",
+                         report.toUtf8().constData());
+            return 1;
+        }
+        std::printf("OK: TSL without a valid CA service -> signature rejected\n");
+
+        // Restore the valid fixture TSL for the PAdES check below.
+        writeAll(work + "/TSL-IT.xml", { tslXml.begin(), tslXml.end() });
+
         // PAdES: sign a real PDF with the same leaf, then verify it through
         // the GUI's verify tab (detached CMS embedded in the PDF).
         const std::vector<unsigned char> pdf = readAll(FDO_SAMPLE_PDF);

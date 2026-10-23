@@ -15,7 +15,8 @@ struct TslService
     std::string serviceTypeIdentifier; // full URI, e.g. http://uri.etsi.org/TrstSvc/Svctype/CA/QC
     std::string serviceName;           // DN or free text
     std::string serviceStatus;         // full URI, e.g. .../Svcstatus/granted
-    std::vector<unsigned char> certDer;
+    std::vector<std::vector<unsigned char>> certs; // ServiceDigitalIdentity certs
+    std::vector<unsigned char> certDer; // first cert (compatibility helper)
 };
 
 struct TslReference
@@ -37,6 +38,12 @@ struct Tsl
 
     std::vector<std::vector<unsigned char>> allCerts; // every X509Certificate, document order
     std::vector<TslService> services;
+
+    // Trust anchors for signature validation: certificates of CA services
+    // whose status is currently valid (granted / recognisedatnationallevel /
+    // accredited). Documents' own certificates and the TSL signing
+    // certificate are never anchors.
+    std::vector<std::vector<unsigned char>> trustAnchors() const;
 
     bool hasSignature = false;
     std::string signatureMethod; // e.g. http://www.w3.org/2001/04/xmldsig-more#rsa-sha256

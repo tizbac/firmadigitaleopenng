@@ -9,6 +9,7 @@
 
 #include "cmssigner.h"
 #include "der.h"
+#include "timecompat.h"
 
 namespace fdo {
 namespace {
@@ -199,7 +200,7 @@ std::time_t parseAsn1Time(std::uint8_t tag, const unsigned char *d, std::size_t 
     }
     if (tm.tm_year < 0 || tm.tm_mon < 0 || tm.tm_mon > 11 || tm.tm_mday < 1)
         return 0;
-    return timegm(&tm);
+    return timegmSafe(tm);
 }
 
 std::string formatTime(std::time_t t)
@@ -207,7 +208,7 @@ std::string formatTime(std::time_t t)
     if (t == 0)
         return {};
     std::tm tm{};
-    gmtime_r(&t, &tm);
+    gmtimeSafe(t, tm);
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
     return buf;
@@ -620,6 +621,12 @@ P7MResult P7M::verifyParsed(const ParsedCms &cms,
                             std::time_t now)
 {
     P7MResult r;
+    // Hard requirement: no TSL-derived trust anchor means no valid signature.
+    // Never fall back to the signer's embedded/self-signed certificate.
+    if (anchors.empty()) {
+        r.error = "nessuna ancora di fiducia TSL: firma non valida";
+        return r;
+    }
 
     // locate the signer certificate in the embedded set by sid (issuer+serial)
     const X509Cert *signer = nullptr;

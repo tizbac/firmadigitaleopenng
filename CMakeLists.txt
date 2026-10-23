@@ -37,11 +37,26 @@ if (NOT POPPLER_QT6_INCLUDE_DIR OR NOT POPPLER_QT6_LIBRARY)
     message(FATAL_ERROR "Poppler-Qt6 not found (install libpoppler-qt6-dev)")
 endif()
 add_library(PopplerQt6 SHARED IMPORTED)
-set_target_properties(PopplerQt6 PROPERTIES
-    IMPORTED_LOCATION "${POPPLER_QT6_LIBRARY}"
-    INTERFACE_INCLUDE_DIRECTORIES "${POPPLER_QT6_INCLUDE_DIR}")
+if (WIN32)
+    # MinGW: find_library() yields the import library (libpoppler-qt6.dll.a).
+    # CMake links shared imported targets through IMPORTED_IMPLIB on Windows.
+    set_target_properties(PopplerQt6 PROPERTIES
+        IMPORTED_IMPLIB "${POPPLER_QT6_LIBRARY}"
+        IMPORTED_LOCATION "${POPPLER_QT6_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${POPPLER_QT6_INCLUDE_DIR}")
+else()
+    set_target_properties(PopplerQt6 PROPERTIES
+        IMPORTED_LOCATION "${POPPLER_QT6_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${POPPLER_QT6_INCLUDE_DIR}")
+endif()
 
-qt_add_executable(firmadigitaleopen
+if (WIN32)
+    set(FDO_WIN32_GUI WIN32)
+else()
+    set(FDO_WIN32_GUI)
+endif()
+
+qt_add_executable(firmadigitaleopen ${FDO_WIN32_GUI}
     src/main.cpp
     src/mainwindow.cpp
     src/pdfpreview.cpp
@@ -49,8 +64,19 @@ qt_add_executable(firmadigitaleopen
     resources/resources.qrc
 )
 
+if (WIN32)
+    # Icon + VERSIONINFO resource, generated so the version tracks the project.
+    configure_file(resources/firmadigitaleopen.rc.in
+                   "${CMAKE_CURRENT_BINARY_DIR}/firmadigitaleopen.rc" @ONLY)
+    target_sources(firmadigitaleopen PRIVATE
+                   "${CMAKE_CURRENT_BINARY_DIR}/firmadigitaleopen.rc")
+endif()
+
 target_link_libraries(firmadigitaleopen PRIVATE Qt6::Widgets Qt6::Network PopplerQt6 fdo_core)
 
+# The test suite is POSIX-only: it is driven by tests/run_pkcs11.sh (bash) and
+# the Windows build is cross-compiled, so the test binaries cannot run there.
+if (NOT WIN32)
 enable_testing()
 
 add_executable(tst_c14n tests/tst_c14n.cpp)
@@ -108,10 +134,48 @@ endif()
 add_test(NAME guisign
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_pkcs11.sh
                  $<TARGET_FILE:tst_guisign>)
+endif() # NOT WIN32
 
 # ---------------------------------------------------------------- packaging --#
 include(GNUInstallDirs)
 
+if (WIN32)
+    # Flat layout: the executable, Qt/OpenSSL/poppler DLLs, the MinGW runtime
+    # and the plugins/ tree all live side by side (the NSIS installer packages
+    # this directory verbatim). DLL collection happens in
+    # packaging/windows/deploy.sh, run by the Docker Windows stage.
+    install(TARGETS firmadigitaleopen RUNTIME DESTINATION .)
+    install(FILES LICENSE README.md README.it.md DESTINATION .)
+
+    # Windows equivalent of libbit4xpki.so. The module shipped in this repo is
+    # Bit4id's official x86-64 bit4xpki.dll (extracted from the Bit4id
+    # Universal Middleware kit), together with the config and the card
+    # licences it reads from its own directory. Drop a libbit4xpki.dll next to
+    # the sources instead to override it; the NSIS installer bundles whatever
+    # is found here.
+    set(FDO_WIN_P11_DLL "")
+    foreach(_dll libbit4xpki.dll bit4xpki.dll)
+        if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_dll}")
+            install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/${_dll}" DESTINATION .)
+            list(APPEND FDO_WIN_P11_DLL "${_dll}")
+            if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_dll}.conf")
+                install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/${_dll}.conf" DESTINATION .)
+            endif()
+            if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_dll}.vpn.license")
+                install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/${_dll}.vpn.license" DESTINATION .)
+            endif()
+            if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_dll}.rc")
+                install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${_dll}.rc"
+                        DESTINATION .
+                        FILES_MATCHING PATTERN "*.lic")
+            endif()
+        endif()
+    endforeach()
+    if (NOT FDO_WIN_P11_DLL)
+        message(WARNING "Nessun libbit4xpki.dll/bit4xpki.dll accanto al repository: "
+                        "l'installer usera il modulo Bit4id gia installato nel sistema")
+    endif()
+else()
 install(TARGETS firmadigitaleopen RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Bit4id PKCS#11 module + its run-time config, shipped inside the app's own
@@ -139,8 +203,10 @@ install(FILES resources/firmadigitaleopen.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES resources/firmadigitaleopen.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+endif() # WIN32
 
 # ------------------------------------------------------------------- CPack --#
+if (NOT WIN32)
 set(CPACK_PACKAGE_NAME "firmadigitaleopen")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_VENDOR "FirmaDigitaleOpen")
@@ -188,3 +254,4 @@ endif()
 set(CPACK_RPM_FILE_NAME
     "${CPACK_RPM_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CPACK_RPM_PACKAGE_RELEASE}.${CPACK_RPM_PACKAGE_ARCHITECTURE}.rpm")
 include(CPack)
+endif() # NOT WIN32

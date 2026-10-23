@@ -223,6 +223,12 @@ build/
 build-new/
 build-plain/
 build-deb/
+build-win/
+build-win64/
+
+# Windows installer build artifacts
+dist/
+firmadigitaleopen-*-win64-setup.exe
 
 # Generated Debian packages (CPack)
 *.deb

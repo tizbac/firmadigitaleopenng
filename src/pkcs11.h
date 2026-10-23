@@ -26,7 +26,8 @@ struct Pkcs11Slot
 };
 
 // Thin wrapper around a PKCS#11 module (Bit4id token in the original app).
-// Loads the library with dlopen; no system PKCS#11 headers required.
+// Loads the library with dlopen (POSIX) / LoadLibraryW (Windows); no system
+// PKCS#11 headers required.
 class Pkcs11
 {
 public:

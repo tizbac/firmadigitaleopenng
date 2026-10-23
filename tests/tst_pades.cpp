@@ -204,6 +204,13 @@ int main(int argc, char **argv)
           "anchor: " + vr.anchorSubject);
     CHECK(!vr.signingTime.empty(), "signingTime: " + vr.signingTime);
 
+    std::printf("== 1b) no TSL anchors must fail (no self-anchoring) ==\n");
+    {
+        std::vector<const X509Cert *> noAnchors;
+        P7MResult nr = Pades::verify(pr.pdfBytes, noAnchors);
+        CHECK(!nr.ok, "verify without TSL anchors rejected (err: " + nr.error + ")");
+    }
+
     // ---- 2) visible signature ----
     std::printf("== 2) visible PAdES-BES (stamp) sign + verify ==\n");
     PadesConfig vcfg = cfg;

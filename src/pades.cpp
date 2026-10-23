@@ -5,6 +5,7 @@
 #include <map>
 
 #include "cmssigner.h"
+#include "timecompat.h"
 
 namespace fdo {
 namespace {
@@ -388,10 +389,11 @@ std::string escapePdfText(const std::string &s)
 std::string pdfDateTime(std::time_t t)
 {
     std::tm tm{};
-    localtime_r(&t, &tm);
+    localtimeSafe(t, tm);
     char buf[40];
     std::strftime(buf, sizeof(buf), "D:%Y%m%d%H%M%S", &tm);
-    int offMin = static_cast<int>((mktime(&tm) - timegm(&tm)) / 60);
+    std::tm utc = tm;
+    int offMin = static_cast<int>((mktime(&tm) - timegmSafe(utc)) / 60);
     char sign = offMin < 0 ? '-' : '+';
     int a = offMin < 0 ? -offMin : offMin;
     char tz[16];
@@ -451,7 +453,7 @@ StampLayout stampLayout(const std::string &line1, const std::string &line2,
 std::string stampTimeString(std::time_t t)
 {
     std::tm tm{};
-    gmtime_r(&t, &tm);
+    gmtimeSafe(t, tm);
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
     return buf;

@@ -27,8 +27,22 @@ testato; la GUI Qt si appoggia su di esso.
   firmati in stile RFC 3161, ritaggiati secondo il layout della specifica PDF).
 - **P7M** firma e verifica di CMS detached.
 - **TSL** parser + verificatore di liste di fiducia (Trusted Lists italiane/Ue).
-- **PKCS#11** strato per token: wrapper `dlopen` minimale (senza header
-  PKCS#11 di sistema) che enumera gli slot, esegue il login, trova la
+- **Build Windows x64** (cross-compilazione MinGW in Docker) con installer NSIS
+  autoconsistente che include Qt, poppler, OpenSSL e il modulo PKCS#11 Bit4id.
+
+## Modello di fiducia
+
+La verifica delle firme si basa esclusivamente sulla TSL e fallisce in modo
+sicuro. Le ancore di fiducia sono i certificati CA dei servizi attualmente
+`granted`, `recognisedatnationallevel` o `accredited` nella TSL selezionata o
+in cache. Il certificato della firma XML della TSL (`ds:KeyInfo`), i servizi
+ritirati/cessati e i servizi non-CA (TSA, eSeal, identità) non vengono mai usati
+come ancore. Senza una TSL aggiornata — file esplicito, cache fresca o download
+automatico riuscito — nessun PDF/P7M firmato viene dichiarato valido. Il
+verificatore del core rifiuta inoltre un insieme di ancore vuoto prima di
+validare la catena, quindi non esiste alcun fallback auto-fidato.
+- **PKCS#11** strato per token: wrapper `dlopen`/`LoadLibraryW` minimale (senza
+  header PKCS#11 di sistema) che enumera gli slot, esegue il login, trova la
   chiave/certificato del firmatario tramite `CKA_ID "DS3"` e firma.
 - Helper per XML canonico (C14N).
 
@@ -58,6 +72,52 @@ Output:
 - `build/firmadigitaleopen` — la GUI Qt
 - `build/fdo_core` — la libreria crittografica/PKCS#11 statica
 - `build/tst_*` — gli eseguibili di test
+
+## Build Windows (64 bit)
+
+La GUI Windows viene cross-compilata con MinGW-w64 in Docker e impacchettata
+con un installer NSIS nativo. Il risultato è un'applicazione x64
+autoconsistente: Qt, poppler, OpenSSL, libxml2 e il runtime MinGW sono inclusi,
+quindi sulla macchina di destinazione non serve installare nulla.
+
+```bash
+docker build --target win-package -t fdo-win .
+docker run --rm -v "$PWD:/out" fdo-win
+# -> firmadigitaleopen-<version>-win64-setup.exe
+```
+
+Cosa fanno gli stage Docker:
+
+- I pacchetti Fedora 44 `mingw64-*` forniscono toolchain, Qt 6.11,
+  poppler-qt6, OpenSSL 3 e libxml2; `cmake/toolchain-mingw64.cmake` indica a
+  CMake quello sysroot.
+- `packaging/windows/deploy.sh` analizza le tabelle di import PE
+  dell'eseguibile e dei plugin, copia accanto all'eseguibile ogni DLL non di
+  sistema presente nello sysroot e i plugin Qt necessari (`platforms`,
+  `styles`, `tls`, `sqldrivers`, `networkinformation`) — lo stesso risultato di
+  `windeployqt`, che la Qt cross di Fedora non fornisce.
+- Uno stage Debian esegue `makensis` (NSIS nativo per Linux, senza Wine) su
+  `packaging/windows/installer.nsi`.
+
+L'installer installa in `%ProgramFiles%\FirmaDigitaleOpen`, crea i collegamenti
+nel menu Start e sul desktop, registra `.pdf` in *Apri con* e associa `.p7m`
+quando non ha già un proprietario, e include il disinstallatore. L'eseguibile è
+una GUI (`-mwindows`) con icona e risorsa VERSIONINFO.
+
+Il modulo PKCS#11 Bit4id è incluso: `bit4xpki.dll` è il modulo ufficiale
+**x86-64** di Bit4id estratto dal kit Universal Middleware (versione modulo
+1.4.11.1228, installer 11.861), insieme a `bit4xpki.dll.conf` e
+`bit4xpki.dll.rc/*.lic`. Questi file devono sempre stare nella stessa directory
+dell'eseguibile (il modulo li legge da lì). Se il modulo manca la compilazione
+riesce comunque e, a runtime, l'app ripiega su un'installazione Bit4id a
+livello di sistema (`%SystemRoot%\System32\bit4xpki.dll`) oppure su OpenSC.
+
+Per ora i test Windows non vengono eseguiti: le suite ctest sono solo POSIX e
+gestite da `tests/run_pkcs11.sh`; la build Windows è verificata a livello di
+compilazione dal workflow GitHub Actions `windows`.
+
+L'installer e l'eseguibile non sono firmati digitalmente, quindi al primo avvio
+Windows SmartScreen potrebbe mostrare un avviso.
 
 ## Esecuzione dei test
 
@@ -192,6 +252,8 @@ tests/
    tst_pkcs11.cpp + run_pkcs11.sh   test PKCS#11 + selezione automatica del modulo
    tst_guisign.cpp                  test headless della GUI + percorso di firma
    data/                            fixture (TSL, PDF di esempio, ecc.)
+cmake/toolchain-mingw64.cmake        toolchain cross Windows x64 (Fedora mingw64)
+packaging/windows/                   installer NSIS + deploy delle DLL runtime
 ```
 
 ## Stato
