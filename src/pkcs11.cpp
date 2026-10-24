@@ -1,5 +1,6 @@
 #include "pkcs11.h"
 #include "x509util.h"
+#include "timecompat.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -11,6 +12,10 @@
 #endif
 #include <cstdio>
 #include <cstring>
+#include <cstdarg>
+#include <cstdlib>
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 
 #include <openssl/x509.h>
@@ -81,10 +86,171 @@ void *librarySymbol(void *handle, const char *name)
 
 void closeLibrary(void *handle)
 {
+#ifdef _WIN32
+    // Bit4id's module starts a certificate-store notification thread when a
+    // card is present. Unloading it (DLL_PROCESS_DETACH) while that thread is
+    // alive crashes inside the module. Keep the DLL mapped for the process
+    // lifetime; Windows releases it at exit. C_Finalize is still called.
+    (void)handle;
+#else
     if (handle)
         dlclose(handle);
+#endif
 }
 #endif
+
+// PKCS#11 string fields are blank-padded, not necessarily NUL-terminated.
+std::string fixedString(const char *p, std::size_t n)
+{
+    std::size_t len = 0;
+    while (len < n && p[len] != '\0')
+        ++len;
+    while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t' || p[len - 1] == '\r' ||
+                       p[len - 1] == '\n'))
+        --len;
+    return std::string(p, len);
+}
+
+// Optional call trace for diagnosing crashes inside a vendor PKCS#11 module.
+// Enable with FDO_PKCS11_TRACE=1; the log goes to %TEMP%\fdo-pkcs11.log
+// (Windows) or $TMPDIR/fdo-pkcs11.log (POSIX). Each line is flushed.
+void tracePkcs11(const char *fmt, ...)
+{
+    if (!std::getenv("FDO_PKCS11_TRACE"))
+        return;
+#ifdef _WIN32
+    const char *dir = std::getenv("TEMP");
+    const char *sep = "\\";
+#else
+    const char *dir = std::getenv("TMPDIR");
+    const char *sep = "/";
+#endif
+    std::string path = (dir && *dir) ? dir : ".";
+    path += sep;
+    path += "fdo-pkcs11.log";
+    FILE *f = std::fopen(path.c_str(), "a");
+    if (!f)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(f, fmt, ap);
+    va_end(ap);
+    std::fputc('\n', f);
+    std::fclose(f);
+}
+
+// Renewed Bit4id tokens move the signing certificate/key from DS3 to DS4,
+// DS5, ... Accept any "DS<digit>" CKA_ID instead of only DS3.
+bool isDsId(const std::vector<unsigned char> &id)
+{
+    return id.size() == 3 && id[0] == 'D' && id[1] == 'S' && id[2] >= '0' &&
+           id[2] <= '9';
+}
+
+std::string idDisplay(const std::vector<unsigned char> &id)
+{
+    if (id.empty())
+        return {};
+    bool printable = true;
+    for (unsigned char c : id) {
+        if (c < 0x20 || c > 0x7e) {
+            printable = false;
+            break;
+        }
+    }
+    if (printable)
+        return std::string(id.begin(), id.end());
+    std::string out;
+    char buf[4];
+    for (unsigned char c : id) {
+        std::snprintf(buf, sizeof(buf), "%02X", c);
+        out += buf;
+    }
+    return out;
+}
+
+struct CertMetadata
+{
+    bool ok = false;
+    std::string subject;
+    std::string givenName;
+    std::string surname;
+    std::string serialHex;
+    std::string keyId;
+    bool keyIdIsDs = false;
+    std::string notAfter;
+    std::time_t notAfterEpoch = 0;
+    bool expired = false;
+};
+
+CertMetadata certMetadata(const std::vector<unsigned char> &der,
+                          const std::vector<unsigned char> &id)
+{
+    CertMetadata m;
+    m.keyId = idDisplay(id);
+    m.keyIdIsDs = isDsId(id);
+    if (der.empty())
+        return m;
+    const unsigned char *p = der.data();
+    X509 *x = d2i_X509(nullptr, &p, static_cast<long>(der.size()));
+    if (!x)
+        return m;
+
+    char *sub = X509_NAME_oneline(X509_get_subject_name(x), nullptr, 0);
+    if (sub) {
+        m.subject = sub;
+        OPENSSL_free(sub);
+    }
+    char buf[1024];
+    int n = X509_NAME_get_text_by_NID(X509_get_subject_name(x), NID_givenName, buf,
+                                      sizeof(buf));
+    if (n > 0)
+        m.givenName.assign(buf, static_cast<size_t>(n));
+    n = X509_NAME_get_text_by_NID(X509_get_subject_name(x), NID_surname, buf,
+                                  sizeof(buf));
+    if (n > 0)
+        m.surname.assign(buf, static_cast<size_t>(n));
+    BIGNUM *bn = ASN1_INTEGER_to_BN(X509_get_serialNumber(x), nullptr);
+    if (bn) {
+        char *h = BN_bn2hex(bn);
+        if (h) {
+            m.serialHex = h;
+            OPENSSL_free(h);
+        }
+        BN_free(bn);
+    }
+
+    const ASN1_TIME *na = X509_get0_notAfter(x);
+    if (na) {
+        m.expired = X509_cmp_current_time(na) < 0;
+        std::tm tm{};
+        if (ASN1_TIME_to_tm(na, &tm) == 1) {
+            m.notAfterEpoch = timegmSafe(tm);
+            char tbuf[40];
+            std::strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S UTC", &tm);
+            m.notAfter = tbuf;
+        }
+    }
+    X509_free(x);
+    m.ok = true;
+    return m;
+}
+
+// Higher score wins: a DSx certificate is preferred, then a currently valid
+// one, then the latest expiry.
+int certScore(const CertMetadata &m)
+{
+    return (m.keyIdIsDs ? 4 : 0) + (!m.expired ? 2 : 0);
+}
+
+bool certBetter(const CertMetadata &a, const CertMetadata &b)
+{
+    const int sa = certScore(a);
+    const int sb = certScore(b);
+    if (sa != sb)
+        return sa > sb;
+    return a.notAfterEpoch > b.notAfterEpoch;
+}
 
 } // namespace
 
@@ -94,6 +260,19 @@ bool loadFnTable(FnTable &t, const std::string &path, std::string *error)
     if (!t.handle) {
         return false;
     }
+#ifdef _WIN32
+    // Bit4id's Windows x64 build packs PKCS#11 structs to 4 bytes: its Lua
+    // bridge walks CK_ATTRIBUTE arrays with a 16-byte stride and reads pValue
+    // at +4 / ulValueLen at +12. Native 24-byte structs make it dereference
+    // padding as a pointer, which crashes deeper in the module.
+    std::string lower = path;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    t.packedAbi = lower.find("bit4") != std::string::npos;
+    if (const char *packed = std::getenv("FDO_PKCS11_PACKED_ABI"))
+        t.packedAbi = std::strcmp(packed, "0") != 0;
+    tracePkcs11("loadFnTable: %s packedAbi=%d", path.c_str(), t.packedAbi ? 1 : 0);
+#endif
     auto sym = [&](const char *name) { return librarySymbol(t.handle, name); };
     t.C_Initialize = reinterpret_cast<C_Initialize_t>(sym("C_Initialize"));
     t.C_Finalize = reinterpret_cast<C_Finalize_t>(sym("C_Finalize"));
@@ -135,7 +314,9 @@ void Pkcs11::close()
         m_sessionOpen = false;
     }
     if (m_fn) {
+#ifndef _WIN32
         m_fn->C_Finalize(nullptr);
+#endif
         if (m_fn->handle)
             closeLibrary(m_fn->handle);
         m_fn.reset();
@@ -152,9 +333,14 @@ bool Pkcs11::loadLibrary(const std::string &libPath, std::string *error)
         m_fn.reset();
         return false;
     }
-    if (m_fn->C_Initialize(nullptr) != CKR_OK) {
+    tracePkcs11("Pkcs11::C_Initialize");
+    const CK_RV rv = m_fn->C_Initialize(nullptr);
+    tracePkcs11("Pkcs11::C_Initialize -> 0x%lx", static_cast<unsigned long>(rv));
+    if (rv != CKR_OK && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED) {
         if (error)
-            *error = std::string("C_Initialize failed: ") + rvName(m_fn->C_Initialize(nullptr));
+            *error = std::string("C_Initialize failed: ") + rvName(rv);
+        if (m_fn->handle)
+            closeLibrary(m_fn->handle);
         m_fn.reset();
         return false;
     }
@@ -202,17 +388,31 @@ bool Pkcs11::findSigner(std::string *error)
             *error = "not logged in";
         return false;
     }
-    const unsigned char ds3[] = {'D', 'S', '3'};
+
+    struct KeyObj
+    {
+        CK_OBJECT_HANDLE handle = 0;
+        std::vector<unsigned char> id;
+        std::string label;
+    };
+    struct CertObj
+    {
+        CK_OBJECT_HANDLE handle = 0;
+        std::vector<unsigned char> id;
+        std::vector<unsigned char> der;
+        CertMetadata meta;
+    };
+    std::vector<KeyObj> keys;
+    std::vector<CertObj> certs;
 
     // Enumerate every object on the token (a NULL template matches all
-    // objects) and match class + CKA_ID on the host side with memcmp,
-    // instead of relying on the module's template filtering.
+    // objects) and match class + CKA_ID on the host side, instead of relying
+    // on the module's template filtering.
     if (m_fn->C_FindObjectsInit(m_session, nullptr, 0) != CKR_OK) {
         if (error)
             *error = "C_FindObjectsInit failed";
         return false;
     }
-    CK_OBJECT_HANDLE key = 0, cert = 0, keyAny = 0, certAny = 0;
     for (;;) {
         CK_OBJECT_HANDLE batch[64];
         CK_ULONG found = 0;
@@ -232,27 +432,24 @@ bool Pkcs11::findSigner(std::string *error)
                 for (size_t b = 0; b < clsBytes.size() && b < sizeof(cls); ++b)
                     cls |= CK_ULONG(clsBytes[b]) << (8 * b);
             std::vector<unsigned char> id;
-            const bool hasId = getAttr(*m_fn, m_session, obj, CKA_ID, id);
-            std::printf("object 0x%lx class=0x%lx id=", static_cast<unsigned long>(obj),
-                        static_cast<unsigned long>(cls));
-            if (hasId)
-                for (unsigned char b : id)
-                    std::printf("%02x", b);
-            else
-                std::printf("(none)");
-            std::printf("\n");
-            const bool isDs3 = hasId && id.size() == sizeof(ds3) &&
-                               std::memcmp(id.data(), ds3, sizeof(ds3)) == 0;
+            getAttr(*m_fn, m_session, obj, CKA_ID, id);
             if (cls == CKO_PRIVATE_KEY) {
-                if (isDs3)
-                    key = obj;
-                else if (!keyAny)
-                    keyAny = obj;
+                KeyObj k;
+                k.handle = obj;
+                k.id = std::move(id);
+                std::vector<unsigned char> label;
+                if (getAttr(*m_fn, m_session, obj, CKA_LABEL, label))
+                    k.label.assign(reinterpret_cast<const char *>(label.data()),
+                                   label.size());
+                keys.push_back(std::move(k));
             } else if (cls == CKO_CERTIFICATE) {
-                if (isDs3)
-                    cert = obj;
-                else if (!certAny)
-                    certAny = obj;
+                CertObj c;
+                c.handle = obj;
+                c.id = std::move(id);
+                if (!getAttr(*m_fn, m_session, obj, CKA_VALUE, c.der) || c.der.empty())
+                    continue;
+                c.meta = certMetadata(c.der, c.id);
+                certs.push_back(std::move(c));
             }
         }
         if (found < 64)
@@ -261,36 +458,52 @@ bool Pkcs11::findSigner(std::string *error)
     if (m_fn->C_FindObjectsFinal)
         m_fn->C_FindObjectsFinal(m_session);
 
-    if (!key)
-        key = keyAny;
-    if (!cert)
-        cert = certAny;
-    m_keyHandle = key;
+    // Prefer a key/certificate pair with the same CKA_ID, then a DSx pair,
+    // then a currently-valid certificate, then the latest expiry. This keeps
+    // working after a renewal moves the signature identity from DS3 to DS4,
+    // DS5, ...
+    const KeyObj *bestKey = nullptr;
+    const CertObj *bestCert = nullptr;
+    for (const KeyObj &k : keys) {
+        for (const CertObj &c : certs) {
+            const bool sameId = !k.id.empty() && !c.id.empty() && k.id == c.id;
+            const bool bothUnknown = k.id.empty() && c.id.empty();
+            if (!sameId && !bothUnknown)
+                continue;
+            if (!bestCert || certBetter(c.meta, bestCert->meta)) {
+                bestKey = &k;
+                bestCert = &c;
+            }
+        }
+    }
+    if (!bestCert || !bestKey) {
+        // Fallback for modules that do not expose CKA_ID at all (SoftHSM):
+        // use the best certificate and the first private key.
+        for (const CertObj &c : certs)
+            if (!bestCert || certBetter(c.meta, bestCert->meta))
+                bestCert = &c;
+        if (!keys.empty())
+            bestKey = &keys.front();
+    }
 
-    if (!key) {
+    if (!bestKey) {
         if (error)
             *error = "chiave privata non trovata sul token";
         return false;
     }
-    if (!cert) {
+    if (!bestCert) {
         if (error)
             *error = "certificato non trovato sul token";
         return false;
     }
 
+    m_keyHandle = bestKey->handle;
     auto s = Signer{};
-    if (!getAttr(*m_fn, m_session, cert, CKA_VALUE, s.certDer)) {
-        if (error)
-            *error = "impossibile leggere il certificato dal token";
-        return false;
-    }
-    std::vector<unsigned char> idBytes;
-    getAttr(*m_fn, m_session, key, CKA_ID, idBytes);
-    s.keyId.assign(reinterpret_cast<const char *>(idBytes.data()), idBytes.size());
-    std::vector<unsigned char> labelBytes;
-    if (getAttr(*m_fn, m_session, key, CKA_LABEL, labelBytes))
-        s.keyLabel.assign(reinterpret_cast<const char *>(labelBytes.data()),
-                          labelBytes.size());
+    s.certDer = bestCert->der;
+    s.keyId = idDisplay(bestKey->id);
+    s.keyLabel = bestKey->label;
+    s.certNotAfter = bestCert->meta.notAfter;
+    s.certExpired = bestCert->meta.expired;
     m_signer = std::move(s);
     return true;
 }
@@ -312,8 +525,12 @@ bool Pkcs11::sign(const std::vector<unsigned char> &data,
     CK_RV rv;
     bool initialised = false;
     for (CK_ULONG cand : kSha256RsaPkcs) {
-        CK_MECHANISM mech{ cand, nullptr, 0 };
-        rv = m_fn->C_SignInit(m_session, &mech, m_keyHandle);
+        CK_MECHANISM nativeMech{ cand, nullptr, 0 };
+        CK_MECHANISM_PACKED packedMech{ cand, nullptr, 0 };
+        CK_MECHANISM_PTR mechPtr = m_fn->packedAbi
+            ? reinterpret_cast<CK_MECHANISM_PTR>(&packedMech)
+            : &nativeMech;
+        rv = m_fn->C_SignInit(m_session, mechPtr, m_keyHandle);
         if (rv == CKR_OK) {
             initialised = true;
             break;
@@ -352,99 +569,170 @@ std::vector<Pkcs11Slot> Pkcs11::enumerateSlots(const std::string &libPath,
                                                std::string *error)
 {
     std::vector<Pkcs11Slot> out;
+    tracePkcs11("enumerateSlots: lib=%s", libPath.c_str());
     FnTable t;
-    if (!loadFnTable(t, libPath, error))
+    if (!loadFnTable(t, libPath, error)) {
+        tracePkcs11("enumerateSlots: loadFnTable failed: %s",
+                    error ? error->c_str() : "(no error)");
         return out;
-    if (t.C_Initialize(nullptr) != CKR_OK) {
+    }
+
+    tracePkcs11("C_Initialize");
+    CK_RV rv = t.C_Initialize(nullptr);
+    tracePkcs11("C_Initialize -> 0x%lx", static_cast<unsigned long>(rv));
+    if (rv != CKR_OK && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED) {
         if (error)
-            *error = "C_Initialize failed";
+            *error = "C_Initialize failed: " + std::string(rvName(rv));
         closeLibrary(t.handle);
         return out;
     }
 
     CK_ULONG count = 0;
-    CK_RV rv = t.C_GetSlotList(CK_TRUE, nullptr, &count);
+    tracePkcs11("C_GetSlotList(NULL)");
+    rv = t.C_GetSlotList(CK_TRUE, nullptr, &count);
+    tracePkcs11("C_GetSlotList(NULL) -> 0x%lx count=%lu",
+                static_cast<unsigned long>(rv), static_cast<unsigned long>(count));
     if (rv == CKR_OK && count > 0) {
         std::vector<CK_SLOT_ID> slots(count);
+        tracePkcs11("C_GetSlotList(buffer)");
         rv = t.C_GetSlotList(CK_TRUE, slots.data(), &count);
+        tracePkcs11("C_GetSlotList(buffer) -> 0x%lx count=%lu",
+                    static_cast<unsigned long>(rv),
+                    static_cast<unsigned long>(count));
         if (rv == CKR_OK) {
             for (CK_ULONG i = 0; i < count; ++i) {
                 Pkcs11Slot s;
                 s.index = slots[i];
-                CK_SLOT_INFO_MIN si{};
-                if (t.C_GetSlotInfo(slots[i], &si) == CKR_OK) {
-                    s.slotDescription = si.slotDescription;
+                tracePkcs11("slot %lu: C_GetSlotInfo",
+                            static_cast<unsigned long>(slots[i]));
+                CK_SLOT_INFO si{};
+                rv = t.C_GetSlotInfo(slots[i], &si);
+                if (rv == CKR_OK) {
+                    s.slotDescription =
+                        fixedString(si.slotDescription, sizeof(si.slotDescription));
                     s.tokenPresent = (si.flags & CKF_TOKEN_PRESENT) != 0;
                 }
+                tracePkcs11("slot %lu: C_GetSlotInfo -> 0x%lx present=%d desc=%s",
+                            static_cast<unsigned long>(slots[i]),
+                            static_cast<unsigned long>(rv), s.tokenPresent ? 1 : 0,
+                            s.slotDescription.c_str());
                 if (!s.tokenPresent)
                     continue;
-                CK_TOKEN_INFO_MIN ti{};
-                if (t.C_GetTokenInfo(slots[i], &ti) == CKR_OK) {
-                    s.tokenLabel = ti.label;
+
+                // Diagnostic/workaround mode: only use the reader-supplied
+                // slot description. Skips C_GetTokenInfo and the whole
+                // session/object/certificate probe, which is where vendor
+                // modules can crash with some cards.
+                if (std::getenv("FDO_PKCS11_MINIMAL")) {
+                    s.tokenLabel = s.slotDescription;
+                    s.loginRequired = true;
+                    tracePkcs11("slot %lu: minimal mode (no token/cert probe)",
+                                static_cast<unsigned long>(slots[i]));
+                    out.push_back(std::move(s));
+                    continue;
+                }
+
+                tracePkcs11("slot %lu: C_GetTokenInfo",
+                            static_cast<unsigned long>(slots[i]));
+                CK_TOKEN_INFO ti{};
+                rv = t.C_GetTokenInfo(slots[i], &ti);
+                if (rv == CKR_OK) {
+                    s.tokenLabel = fixedString(ti.label, sizeof(ti.label));
                     s.loginRequired = (ti.flags & CKF_LOGIN_REQUIRED) != 0;
                 }
+                tracePkcs11("slot %lu: C_GetTokenInfo -> 0x%lx label=%s",
+                            static_cast<unsigned long>(slots[i]),
+                            static_cast<unsigned long>(rv), s.tokenLabel.c_str());
 
                 // Best-effort: open a RO session and read the first certificate.
                 CK_SESSION_HANDLE session = 0;
-                if (t.C_OpenSession(slots[i], CKF_SERIAL_SESSION, nullptr, nullptr,
-                                    &session) == CKR_OK) {
+                tracePkcs11("slot %lu: C_OpenSession",
+                            static_cast<unsigned long>(slots[i]));
+                rv = t.C_OpenSession(slots[i], CKF_SERIAL_SESSION, nullptr, nullptr,
+                                     &session);
+                tracePkcs11("slot %lu: C_OpenSession -> 0x%lx",
+                            static_cast<unsigned long>(slots[i]),
+                            static_cast<unsigned long>(rv));
+                if (rv == CKR_OK) {
                     CK_ULONG cls = CKO_CERTIFICATE;
-                    CK_ATTRIBUTE tmpl = { CKA_CLASS, &cls, sizeof(cls) };
-                    CK_OBJECT_HANDLE obj = 0;
+                    CK_ATTRIBUTE nativeTmpl = { CKA_CLASS, &cls, sizeof(cls) };
+                    CK_ATTRIBUTE_PACKED packedTmpl = { CKA_CLASS, &cls, sizeof(cls) };
+                    CK_ATTRIBUTE_PTR tmplPtr = t.packedAbi
+                        ? reinterpret_cast<CK_ATTRIBUTE_PTR>(&packedTmpl)
+                        : &nativeTmpl;
+                    CK_OBJECT_HANDLE batch[64];
                     CK_ULONG foundCount = 0;
-                    const bool findActive = t.C_FindObjectsInit(session, &tmpl, 1) == CKR_OK;
-                    // Some modules (e.g. SoftHSM) require a non-NULL count pointer.
-                    if (findActive &&
-                        t.C_FindObjects(session, &obj, 1, &foundCount) == CKR_OK && obj != 0) {
-                        std::vector<unsigned char> der;
-                        if (getAttr(t, session, obj, CKA_VALUE, der) && !der.empty()) {
-                            const unsigned char *p = der.data();
-                            X509 *x = d2i_X509(nullptr, &p, static_cast<long>(der.size()));
-                            if (x) {
-                                s.hasCert = true;
-                                char buf[1024];
-                                char *sub = X509_NAME_oneline(X509_get_subject_name(x), nullptr, 0);
-                                if (sub) {
-                                    s.certSubject = sub;
-                                    OPENSSL_free(sub);
+                    CertMetadata bestMeta;
+                    tracePkcs11("C_FindObjectsInit(CKA_CLASS=CKO_CERTIFICATE, packed=%d)",
+                                t.packedAbi ? 1 : 0);
+                    rv = t.C_FindObjectsInit(session, tmplPtr, 1);
+                    tracePkcs11("C_FindObjectsInit -> 0x%lx",
+                                static_cast<unsigned long>(rv));
+                    const bool findActive = rv == CKR_OK;
+                    if (findActive) {
+                        for (;;) {
+                            tracePkcs11("C_FindObjects");
+                            rv = t.C_FindObjects(session, batch, 64, &foundCount);
+                            tracePkcs11("C_FindObjects -> 0x%lx count=%lu",
+                                        static_cast<unsigned long>(rv),
+                                        static_cast<unsigned long>(foundCount));
+                            if (rv != CKR_OK)
+                                break;
+                            for (CK_ULONG n = 0; n < foundCount; ++n) {
+                                std::vector<unsigned char> id;
+                                getAttr(t, session, batch[n], CKA_ID, id);
+                                std::vector<unsigned char> der;
+                                if (!getAttr(t, session, batch[n], CKA_VALUE, der) ||
+                                    der.empty())
+                                    continue;
+                                const CertMetadata meta = certMetadata(der, id);
+                                if (!meta.ok)
+                                    continue;
+                                if (!s.hasCert || certBetter(meta, bestMeta)) {
+                                    bestMeta = meta;
+                                    s.hasCert = true;
+                                    s.certSubject = meta.subject;
+                                    s.certGivenName = meta.givenName;
+                                    s.certSurname = meta.surname;
+                                    s.certSerialHex = meta.serialHex;
+                                    s.certKeyId = meta.keyId;
+                                    s.certKeyIdIsDs = meta.keyIdIsDs;
+                                    s.certNotAfter = meta.notAfter;
+                                    s.certNotAfterEpoch = meta.notAfterEpoch;
+                                    s.certExpired = meta.expired;
                                 }
-                                int n = X509_NAME_get_text_by_NID(
-                                    X509_get_subject_name(x), NID_givenName, buf,
-                                    sizeof(buf));
-                                if (n > 0)
-                                    s.certGivenName.assign(buf, static_cast<size_t>(n));
-                                n = X509_NAME_get_text_by_NID(
-                                    X509_get_subject_name(x), NID_surname, buf,
-                                    sizeof(buf));
-                                if (n > 0)
-                                    s.certSurname.assign(buf, static_cast<size_t>(n));
-                                BIGNUM *bn = ASN1_INTEGER_to_BN(X509_get_serialNumber(x), nullptr);
-                                if (bn) {
-                                    char *h = BN_bn2hex(bn);
-                                    if (h) {
-                                        s.certSerialHex = h;
-                                        OPENSSL_free(h);
-                                    }
-                                    BN_free(bn);
-                                }
-                                X509_free(x);
                             }
+                            if (foundCount < 64)
+                                break;
                         }
                     }
                     if (findActive) {
+                        tracePkcs11("C_FindObjectsFinal");
                         if (t.C_FindObjectsFinal)
                             t.C_FindObjectsFinal(session);
                         else
                             t.C_FindObjectsInit(session, nullptr, 0);
                     }
+                    tracePkcs11("C_CloseSession");
                     t.C_CloseSession(session);
                 }
                 out.push_back(std::move(s));
             }
         }
     }
+#ifndef _WIN32
+    tracePkcs11("C_Finalize");
     t.C_Finalize(nullptr);
+    tracePkcs11("C_Finalize -> done");
+    tracePkcs11("closeLibrary");
     closeLibrary(t.handle);
+    tracePkcs11("closeLibrary -> done");
+#else
+    // Keep the vendor module loaded and initialized for the process lifetime:
+    // Bit4id's notify thread must not be torn down while a card is present.
+    tracePkcs11("keeping PKCS#11 module loaded (Windows)");
+#endif
+    tracePkcs11("enumerateSlots: done (%zu slots)", out.size());
     return out;
 }
 

@@ -17,6 +17,20 @@ PKCS#11 security token (Bit4id) for the private key. It also verifies
 The cryptographic core (`fdo_core`) has no Qt dependency and is fully unit
 tested; the Qt GUI sits on top of it.
 
+## Windows version
+
+A self-contained **Windows x64** version is available from the
+[Releases](https://github.com/tizbac/firmadigitaleopenng/releases) page as
+`firmadigitaleopen-<version>-win64-setup.exe`. It bundles Qt 6, Poppler,
+OpenSSL, libxml2 and the Bit4id PKCS#11 module, so no separate runtime or Qt
+installation is required.
+
+- `.p7m` file association (`.pdf` keeps the user's default reader)
+- Explorer right-click actions: **Firma PDF** on PDFs, **Firma PAdES** and
+  **Firma P7M** on any file type
+- Renewed-token identities `DS3`, `DS4`, `DS5`… with certificate expiry shown
+  and warnings for non-DSx or expired certificates
+
 ## Features
 
 - **PAdES-BES** PDF signing (ByteRange + CMS signed-data, RFC 3161-style
@@ -40,7 +54,9 @@ empty anchor set before validating the chain, so there is no self-anchored
 fallback.
 - **PKCS#11** token layer: thin `dlopen`/`LoadLibraryW` wrapper (no system PKCS#11
   headers required) that enumerates slots, logs in, finds the signer key/cert by
-  `CKA_ID "DS3"`, and signs.
+  `CKA_ID` `DS3`/`DS4`/`DS5`... (renewed tokens), and signs. The GUI shows the
+  certificate `CKA_ID` and expiry and warns before signing with a non-DSx or
+  expired certificate.
 - Canonical XML (C14N) helpers.
 
 ## Dependencies
@@ -97,9 +113,11 @@ What the Docker stages do:
   `packaging/windows/installer.nsi`.
 
 The installer installs under `%ProgramFiles%\FirmaDigitaleOpen`, creates Start
-Menu and desktop shortcuts, registers `.pdf` under *Open with* and claims
-`.p7m` when it has no owner, and ships an uninstaller. The executable is built
-as a GUI app (`-mwindows`) with icon and VERSIONINFO resource.
+Menu and desktop shortcuts, and ships an uninstaller. It associates **only
+`.p7m`** (claimed when it has no owner) and adds Explorer context-menu actions:
+**Firma PDF** on `.pdf` files plus **Firma PAdES** and **Firma P7M** on every
+file type. `.pdf` keeps the user's default reader. The executable is built as a
+GUI app (`-mwindows`) with icon and VERSIONINFO resource.
 
 The Bit4id PKCS#11 module is bundled: `bit4xpki.dll` is Bit4id's official
 **x86-64** module taken from the Bit4id Universal Middleware kit (module

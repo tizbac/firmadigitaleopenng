@@ -4,6 +4,7 @@
 #include "p7m.h"
 #include "x509util.h"
 
+#include <QStringList>
 #include <QTabWidget>
 #include <QLineEdit>
 #include <QComboBox>
@@ -12,7 +13,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
-#include <QPlainTextEdit>
+#include <QTextEdit>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
@@ -20,6 +21,7 @@
 #include <QMessageBox>
 #include <QFileInfo>
 #include <QFile>
+#include <QFont>
 #include <QApplication>
 #include <QFrame>
 #include <QThread>
@@ -100,6 +102,59 @@ QString cnFromSubject(const std::string &subject)
     return QString::fromStdString(subject.substr(pos, end - pos)).trimmed();
 }
 
+// ---------------------------------------------------------------------------
+// Rich-text blocks for the verification report (QTextEdit HTML subset).
+// Fixed light backgrounds keep the banners readable on light and dark themes.
+// ---------------------------------------------------------------------------
+QString reportBanner(const QString &title, const QString &subtitle,
+                     const QString &background, const QString &bar,
+                     const QString &foreground)
+{
+    QString sub;
+    if (!subtitle.isEmpty())
+        sub = QStringLiteral("<br><span style=\"font-size:10pt;\">%1</span>")
+                  .arg(subtitle.toHtmlEscaped());
+    return QStringLiteral(
+               "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" "
+               "style=\"margin-bottom:10px;\"><tr>"
+               "<td width=\"8\" bgcolor=\"%1\">&nbsp;</td>"
+               "<td bgcolor=\"%2\" style=\"padding:10px 14px;\">"
+               "<span style=\"font-size:18pt; font-weight:700; color:%3;\">%4</span>%5"
+               "</td></tr></table>")
+        .arg(bar, background, foreground, title.toHtmlEscaped(), sub);
+}
+
+QString reportRow(const QString &label, const QString &value)
+{
+    return QStringLiteral(
+               "<tr>"
+               "<td valign=\"top\" style=\"padding:4px 16px 4px 0; color:#64748b;\">"
+               "<b>%1</b></td>"
+               "<td valign=\"top\" style=\"padding:4px 0;\">%2</td>"
+               "</tr>")
+        .arg(label.toHtmlEscaped(), value.toHtmlEscaped());
+}
+
+QString reportNotice(const QString &text, const QString &background,
+                     const QString &border, const QString &foreground)
+{
+    return QStringLiteral(
+               "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" "
+               "style=\"margin-top:8px;\"><tr>"
+               "<td width=\"8\" bgcolor=\"%1\">&nbsp;</td>"
+               "<td bgcolor=\"%2\"><span style=\"color:%3; font-weight:700;\">"
+               "%4</span></td></tr></table>")
+        .arg(border, background, foreground, text.toHtmlEscaped());
+}
+
+QString reportFooter(const QString &text)
+{
+    return QStringLiteral(
+               "<p style=\"margin-top:14px; color:#64748b; font-size:9pt;\">"
+               "%1</p>")
+        .arg(text.toHtmlEscaped());
+}
+
 QString stampSignerName(const fdo::Pkcs11Slot &slot)
 {
     const QString gn = QString::fromStdString(slot.certGivenName).trimmed();
@@ -174,6 +229,10 @@ MainWindow::MainWindow(QWidget *parent)
             [this](const QString &) { detectSlots(m_p11Lib, m_p11Slot, m_p11Slots); });
     connect(m_p7mLib, &QLineEdit::textChanged, this,
             [this](const QString &) { detectSlots(m_p7mLib, m_p7mSlot, m_p7mSlots); });
+    connect(m_p11Slot, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { updateCertInfo(m_p11Slot, m_p11Slots, m_p11CertInfo); });
+    connect(m_p7mSlot, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { updateCertInfo(m_p7mSlot, m_p7mSlots, m_p7mCertInfo); });
     detectSlots(m_p11Lib, m_p11Slot, m_p11Slots);
     detectSlots(m_p7mLib, m_p7mSlot, m_p7mSlots);
 }
@@ -232,6 +291,12 @@ QWidget *MainWindow::buildPadesTab()
     lv->addWidget(new QLabel(tr("Slot:")));
     m_p11Slot = new QComboBox;
     lv->addWidget(m_p11Slot);
+
+    m_p11CertInfo = new QLabel;
+    m_p11CertInfo->setWordWrap(true);
+    m_p11CertInfo->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_p11CertInfo->hide();
+    lv->addWidget(m_p11CertInfo);
 
     lv->addWidget(new QLabel(tr("PIN:")));
     m_p11Pin = new QLineEdit;
@@ -365,6 +430,12 @@ QWidget *MainWindow::buildP7mTab()
     m_p7mSlot = new QComboBox;
     form->addRow(tr("Slot:"), m_p7mSlot);
 
+    m_p7mCertInfo = new QLabel;
+    m_p7mCertInfo->setWordWrap(true);
+    m_p7mCertInfo->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_p7mCertInfo->hide();
+    form->addRow(m_p7mCertInfo);
+
     m_p7mPin = new QLineEdit;
     m_p7mPin->setEchoMode(QLineEdit::Password);
     form->addRow(tr("PIN:"), m_p7mPin);
@@ -429,15 +500,24 @@ QWidget *MainWindow::buildVerifyTab()
 
     outer->addLayout(form);
 
-    m_verifyReport = new QPlainTextEdit;
+    m_verifyStatus = new QLabel;
+    m_verifyStatus->setWordWrap(true);
+    m_verifyStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_verifyStatus->hide();
+    outer->addWidget(m_verifyStatus);
+
+    auto *reportTitle = new QLabel(tr("Report di verifica"));
+    QFont reportFont = reportTitle->font();
+    reportFont.setBold(true);
+    reportTitle->setFont(reportFont);
+    outer->addWidget(reportTitle);
+
+    m_verifyReport = new QTextEdit;
     m_verifyReport->setReadOnly(true);
+    m_verifyReport->setAcceptRichText(true);
     m_verifyReport->setPlaceholderText(
         tr("Il report di verifica apparirà qui."));
     outer->addWidget(m_verifyReport, 1);
-
-    m_verifyStatus = new QLabel;
-    m_verifyStatus->setWordWrap(true);
-    outer->addWidget(m_verifyStatus);
     return tab;
 }
 
@@ -450,15 +530,16 @@ QString MainWindow::defaultP11Lib() const
     const QString pf = QString::fromLocal8Bit(qgetenv("ProgramFiles"));
     const QStringList candidates = {
         QString::fromLocal8Bit(qgetenv("FDO_PKCS11_LIB")),
-        // Bundled next to the executable (NSIS installer): both the name we
-        // ship and Bit4id's own Windows module name are accepted.
+        // Explicit per-installation override next to the executable.
         appDir + "/libbit4xpki.dll",
-        appDir + "/bit4xpki.dll",
-        // Machine-wide Bit4id middleware installs.
+        // Prefer a machine-wide Bit4id middleware install when present: it
+        // ships its full x64 companion set and registry configuration.
         winDir + "/System32/bit4xpki.dll",
-        winDir + "/System32/libbit4xpki.dll",
         pf86 + "/Bit4Id/Universal MW/etc/bit4xpki.dll",
         pf + "/Bit4Id/Universal MW/etc/bit4xpki.dll",
+        // Self-contained bundle shipped by the installer.
+        appDir + "/bit4xpki.dll",
+        winDir + "/System32/libbit4xpki.dll",
         // OpenSC is handy for testing with non-Bit4id tokens.
         winDir + "/System32/opensc-pkcs11.dll",
         // Bare names: LoadLibraryW also searches PATH and the app directory.
@@ -573,6 +654,8 @@ void MainWindow::onSlotsEnumerated(int gen, const std::vector<fdo::Pkcs11Slot> &
             ++it;
         }
     }
+    updateCertInfo(m_p11Slot, m_p11Slots, m_p11CertInfo);
+    updateCertInfo(m_p7mSlot, m_p7mSlots, m_p7mCertInfo);
     if (m_preview) {
         m_preview->setStampInfo(
             m_visibleText->text(),
@@ -611,6 +694,84 @@ fdo::Pkcs11Slot MainWindow::selectedSlot(QComboBox *box,
     if (!store.empty())
         return store.front();
     return {};
+}
+
+void MainWindow::updateCertInfo(QComboBox *box,
+                                const std::vector<fdo::Pkcs11Slot> &store,
+                                QLabel *label)
+{
+    if (!label)
+        return;
+    const int i = box->currentIndex();
+    if (i < 0 || i >= static_cast<int>(store.size()) || !store[i].hasCert) {
+        label->hide();
+        return;
+    }
+    const fdo::Pkcs11Slot &s = store[i];
+    const QString id = s.certKeyId.empty()
+                           ? tr("non disponibile")
+                           : QString::fromStdString(s.certKeyId);
+    QStringList lines;
+    lines << tr("Certificato: %1").arg(QString::fromStdString(s.certSubject));
+    lines << tr("CKA_ID: %1").arg(id);
+    lines << (s.certNotAfter.empty()
+                  ? tr("Scadenza: non disponibile")
+                  : tr("Scadenza: %1").arg(QString::fromStdString(s.certNotAfter)));
+
+    bool warn = false;
+    if (s.certExpired) {
+        lines << tr("ATTENZIONE: certificato SCADUTO.");
+        warn = true;
+    }
+    if (!s.certKeyIdIsDs) {
+        lines << tr("ATTENZIONE: CKA_ID non DSx (atteso DS3, DS4, DS5...).");
+        warn = true;
+    }
+
+    label->setText(lines.join("\n"));
+    if (s.certExpired) {
+        label->setStyleSheet(
+            "QLabel { background-color:#fee2e2; color:#7f1d1d; "
+            "border:1px solid #dc2626; border-radius:6px; padding:6px 8px; "
+            "font-weight:700; }");
+    } else if (warn) {
+        label->setStyleSheet(
+            "QLabel { background-color:#fef3c7; color:#78350f; "
+            "border:1px solid #f59e0b; border-radius:6px; padding:6px 8px; "
+            "font-weight:700; }");
+    } else {
+        label->setStyleSheet(
+            "QLabel { background-color:#dcfce7; color:#14532d; "
+            "border:1px solid #16a34a; border-radius:6px; padding:6px 8px; }");
+    }
+    label->show();
+}
+
+bool MainWindow::confirmSlotWarnings(const fdo::Pkcs11Slot &slot)
+{
+    if (!slot.hasCert)
+        return true;
+    QStringList warnings;
+    if (slot.certExpired) {
+        warnings << tr("Il certificato è SCADUTO il %1.")
+                        .arg(slot.certNotAfter.empty()
+                                 ? tr("(data non disponibile)")
+                                 : QString::fromStdString(slot.certNotAfter));
+    }
+    if (!slot.certKeyIdIsDs) {
+        warnings << tr("Il certificato non ha un CKA_ID DSx (trovato: %1).")
+                        .arg(slot.certKeyId.empty()
+                                 ? tr("non disponibile")
+                                 : QString::fromStdString(slot.certKeyId));
+    }
+    if (warnings.isEmpty())
+        return true;
+    const auto answer = QMessageBox::warning(
+        this, tr("Attenzione certificato"),
+        warnings.join("\n\n") + "\n\n" +
+            tr("Continuare comunque con la firma?"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    return answer == QMessageBox::Yes;
 }
 
 void MainWindow::loadFileInput(const QString &path)
@@ -711,6 +872,10 @@ void MainWindow::signPdf()
         return;
     }
 
+    const fdo::Pkcs11Slot slot = selectedSlot(m_p11Slot, m_p11Slots);
+    if (!confirmSlotWarnings(slot))
+        return;
+
     std::string err;
     std::vector<unsigned char> pdfBytes;
     if (!readFileBytes(in, pdfBytes, err)) {
@@ -721,7 +886,7 @@ void MainWindow::signPdf()
     Pkcs11Worker::SignParams p;
     p.kind = Pkcs11Worker::SignParams::Pades;
     p.libPath = lib;
-    p.slotIndex = selectedSlot(m_p11Slot, m_p11Slots).index;
+    p.slotIndex = slot.index;
     p.pin = pin;
     p.pdfData = QByteArray(reinterpret_cast<const char *>(pdfBytes.data()),
                            static_cast<int>(pdfBytes.size()));
@@ -793,10 +958,14 @@ void MainWindow::signFile()
         return;
     }
 
+    const fdo::Pkcs11Slot slot = selectedSlot(m_p7mSlot, m_p7mSlots);
+    if (!confirmSlotWarnings(slot))
+        return;
+
     Pkcs11Worker::SignParams p;
     p.kind = Pkcs11Worker::SignParams::P7M;
     p.libPath = lib;
-    p.slotIndex = selectedSlot(m_p7mSlot, m_p7mSlots).index;
+    p.slotIndex = slot.index;
     p.pin = pin;
     p.p7mIn = in;
     p.p7mOut = out;
@@ -924,9 +1093,10 @@ void MainWindow::refreshTsl()
                                  .arg(cache));
         return;
     }
-    m_verifyStatus->setText(tr("TSL aggiornata: %1 (%2 certificati di fiducia)")
-                                .arg(QString::fromStdString(tsl->issueDateTime))
-                                .arg(tsl->trustAnchors().size()));
+    setVerifyStatus(tr("TSL aggiornata: %1 (%2 certificati di fiducia)")
+                        .arg(QString::fromStdString(tsl->issueDateTime))
+                        .arg(tsl->trustAnchors().size()),
+                    VerifyStatus::Info);
 }
 
 MainWindow::TslResolution MainWindow::resolveTsl(bool allowDownload)
@@ -1048,65 +1218,137 @@ void MainWindow::verifyP7m()
     // A fresh, usable TSL is mandatory: without it no trust chain can be
     // established and the signature cannot be declared valid. If none was
     // selected or cached, try to download the current Italian list first.
+    setVerifyStatus(tr("Verifica in corso..."), VerifyStatus::Busy);
     const bool allowDownload = qEnvironmentVariableIsEmpty("FDO_DISABLE_TSL_DOWNLOAD");
     const TslResolution tslRes = resolveTsl(allowDownload);
 
     if (tslRes.state != TslResolution::State::Ok) {
-        m_verifyReport->setPlainText(tr("=== FIRMA NON VALIDA ===\n\n%1\n")
-                                         .arg(tslRes.error));
+        QString html = reportBanner(tr("FIRMA NON VALIDA"),
+                                    tr("Nessuna TSL aggiornata disponibile."),
+                                    "#fee2e2", "#dc2626", "#7f1d1d");
+        html += reportNotice(tslRes.error, "#fef2f2", "#dc2626", "#7f1d1d");
+        m_verifyReport->setHtml(html);
         m_verifyContent.clear();
         m_verifyContentReady = false;
         m_saveOriginalBtn->setEnabled(false);
-        m_verifyStatus->setText(tr("Firma non valida (nessuna TSL aggiornata)."));
+        setVerifyStatus(tr("Firma non valida (nessuna TSL aggiornata)."),
+                        VerifyStatus::Error);
         return;
     }
 
-    m_verifyStatus->setText(tr("Verifica in corso..."));
     QApplication::setOverrideCursor(Qt::WaitCursor);
     const fdo::P7MResult res =
         isPdf ? fdo::Pades::verify(bytes, tslRes.anchors)
               : fdo::P7M::decodeAndVerify(bytes, tslRes.anchors);
     QApplication::restoreOverrideCursor();
 
-    QString report;
+    const QString typeLabel =
+        isPdf ? tr("PDF firmato (PAdES incorporato)") : tr("File P7M (CAdES)");
+    QString html;
     if (res.ok) {
-        report += tr("=== FIRMA VALIDA ===\n\n");
-        report += tr("Tipo di firma: %1\n")
-                      .arg(isPdf ? tr("PDF firmato (PAdES incorporato)")
-                                 : tr("File P7M (CAdES)"));
-        report += tr("TSL di fiducia: %1\n").arg(tslRes.info);
-        report += tr("Firmatario: %1\n").arg(QString::fromStdString(res.signerSubject));
-        report += tr("Emittente: %1\n").arg(QString::fromStdString(res.signerIssuer));
-        report += tr("Seriale: %1\n").arg(QString::fromStdString(res.signerSerial));
-        if (!res.signingTime.empty())
-            report += tr("Ora di firma: %1\n").arg(QString::fromStdString(res.signingTime));
-        report += tr("Ancora di fiducia: %1\n").arg(QString::fromStdString(res.anchorSubject));
-        report += tr("Certificati incorporati: %1\n").arg(res.embeddedCerts);
+        html += reportBanner(tr("FIRMA VALIDA"),
+                             tr("La firma è valida e la catena termina su un'ancora "
+                                "della TSL."),
+                             "#dcfce7", "#16a34a", "#14532d");
         if (res.validAtSigningTimeOnly)
-            report += tr("Avvertenza: la catena era valida al momento della firma, "
-                         "ma non lo è più oggi.\n");
+            html += reportNotice(tr("Avvertenza: la catena era valida al momento "
+                                    "della firma, ma non lo è più oggi."),
+                                 "#fef3c7", "#f59e0b", "#78350f");
+        html += QStringLiteral("<table width=\"100%\" cellspacing=\"0\" "
+                               "cellpadding=\"0\" style=\"margin-top:8px;\">");
+        html += reportRow(tr("Tipo di firma"), typeLabel);
+        html += reportRow(tr("Firmatario"),
+                          QString::fromStdString(res.signerSubject));
+        html += reportRow(tr("Emittente"),
+                          QString::fromStdString(res.signerIssuer));
+        html += reportRow(tr("Seriale"),
+                          QString::fromStdString(res.signerSerial));
+        if (!res.signingTime.empty())
+            html += reportRow(tr("Ora di firma"),
+                              QString::fromStdString(res.signingTime));
+        html += reportRow(tr("Ancora di fiducia"),
+                          QString::fromStdString(res.anchorSubject));
+        html += reportRow(tr("Certificati incorporati"),
+                          QString::number(res.embeddedCerts));
+        if (!res.content.empty())
+            html += reportRow(tr("File originale incorporato"),
+                              tr("%1 byte").arg(static_cast<qulonglong>(
+                                  res.content.size())));
+        html += QStringLiteral("</table>");
     } else {
-        report += tr("=== FIRMA NON VALIDA ===\n\n");
-        report += tr("TSL di fiducia: %1\n").arg(tslRes.info);
-        report += QString::fromStdString(res.error) + "\n";
-        if (!res.signerSubject.empty()) {
-            report += "\n" + tr("Firmatario: %1\n")
-                          .arg(QString::fromStdString(res.signerSubject));
+        html += reportBanner(tr("FIRMA NON VALIDA"),
+                             tr("La firma non supera la verifica."),
+                             "#fee2e2", "#dc2626", "#7f1d1d");
+        html += reportNotice(QString::fromStdString(res.error), "#fef2f2",
+                             "#dc2626", "#7f1d1d");
+        if (!res.signerSubject.empty() || !res.signingTime.empty()) {
+            html += QStringLiteral("<table width=\"100%\" cellspacing=\"0\" "
+                                   "cellpadding=\"0\" style=\"margin-top:8px;\">");
+            if (!res.signerSubject.empty())
+                html += reportRow(tr("Firmatario"),
+                                  QString::fromStdString(res.signerSubject));
             if (!res.signingTime.empty())
-                report += tr("Ora di firma: %1\n")
-                              .arg(QString::fromStdString(res.signingTime));
+                html += reportRow(tr("Ora di firma"),
+                                  QString::fromStdString(res.signingTime));
+            html += QStringLiteral("</table>");
         }
     }
-    if (!res.content.empty())
-        report += "\n" + tr("File originale incorporato: %1 byte\n").arg(res.content.size());
-    m_verifyReport->setPlainText(report);
+    html += reportFooter(tr("TSL di fiducia: %1").arg(tslRes.info));
+    m_verifyReport->setHtml(html);
 
     m_verifyContent = res.ok ? res.content : std::vector<unsigned char>();
     m_verifyContentReady = res.ok && !res.content.empty();
     m_saveOriginalBtn->setEnabled(m_verifyContentReady);
 
-    m_verifyStatus->setText(res.ok ? tr("Firma valida.")
-                                   : tr("Firma non valida."));
+    if (res.ok) {
+        if (res.validAtSigningTimeOnly)
+            setVerifyStatus(tr("Firma valida solo al momento della firma."),
+                            VerifyStatus::Warning);
+        else
+            setVerifyStatus(tr("Firma valida."), VerifyStatus::Ok);
+    } else {
+        setVerifyStatus(tr("Firma non valida."), VerifyStatus::Error);
+    }
+}
+
+void MainWindow::setVerifyStatus(const QString &text, VerifyStatus status)
+{
+    QString background, foreground, border;
+    switch (status) {
+    case VerifyStatus::Ok:
+        background = QStringLiteral("#dcfce7");
+        foreground = QStringLiteral("#14532d");
+        border = QStringLiteral("#16a34a");
+        break;
+    case VerifyStatus::Warning:
+        background = QStringLiteral("#fef3c7");
+        foreground = QStringLiteral("#78350f");
+        border = QStringLiteral("#f59e0b");
+        break;
+    case VerifyStatus::Error:
+        background = QStringLiteral("#fee2e2");
+        foreground = QStringLiteral("#7f1d1d");
+        border = QStringLiteral("#dc2626");
+        break;
+    case VerifyStatus::Busy:
+        background = QStringLiteral("#e0f2fe");
+        foreground = QStringLiteral("#075985");
+        border = QStringLiteral("#0ea5e9");
+        break;
+    case VerifyStatus::Info:
+    default:
+        background = QStringLiteral("#e2e8f0");
+        foreground = QStringLiteral("#334155");
+        border = QStringLiteral("#94a3b8");
+        break;
+    }
+    m_verifyStatus->setStyleSheet(
+        QStringLiteral("QLabel { background-color:%1; color:%2; border:1px solid "
+                       "%3; border-radius:6px; padding:8px 12px; "
+                       "font-weight:700; }")
+            .arg(background, foreground, border));
+    m_verifyStatus->setText(text);
+    m_verifyStatus->setVisible(!text.isEmpty());
 }
 
 void MainWindow::saveOriginalFile()
@@ -1135,7 +1377,8 @@ void MainWindow::saveOriginalFile()
         QMessageBox::critical(this, tr("Errore"), QString::fromStdString(err));
         return;
     }
-    m_verifyStatus->setText(tr("File originale salvato: %1").arg(path));
+    setVerifyStatus(tr("File originale salvato: %1").arg(path),
+                    VerifyStatus::Info);
 }
 
 void MainWindow::openFileForVerify(const QString &path)
@@ -1143,6 +1386,28 @@ void MainWindow::openFileForVerify(const QString &path)
     m_tabs->setCurrentIndex(2);
     m_verifyP7m->setText(path);
     verifyP7m();
+}
+
+void MainWindow::openFileForSignPades(const QString &path)
+{
+    if (!path.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive)) {
+        QMessageBox::warning(
+            this, tr("File non PDF"),
+            tr("La firma PAdES richiede un file PDF:\n%1").arg(path));
+        return;
+    }
+    m_tabs->setCurrentIndex(0);
+    loadFileInput(path);
+}
+
+void MainWindow::openFileForSignP7m(const QString &path)
+{
+    m_tabs->setCurrentIndex(1);
+    m_fileInput->setText(path);
+    const QFileInfo fi(path);
+    m_fileOutput->setText(fi.absolutePath() + "/" + fi.fileName() + ".p7m");
+    recordUsedDir(path);
+    m_p7mPin->setFocus();
 }
 
 void MainWindow::loadVerifyFile(const QString &path)

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstddef>
+#include <vector>
+
 // ---------------------------------------------------------------------------
 // Minimal PKCS#11 ABI (subset, from the OASIS spec; layout-stable).
 // ---------------------------------------------------------------------------
@@ -25,6 +28,7 @@ using CK_VOID_PTR = void *;
 using CK_VOID_PTR_PTR = void **;
 using CK_UTF8CHAR = char;
 using CK_UTF8CHAR_PTR = CK_UTF8CHAR *;
+using CK_CHAR = unsigned char;
 using CK_NOTIFICATION = CK_ULONG;
 using CK_NOTIFY = void (*)(CK_SESSION_HANDLE, CK_NOTIFICATION, CK_OBJECT_HANDLE,
                            CK_ULONG, CK_VOID_PTR);
@@ -36,7 +40,9 @@ constexpr CK_RV CKR_HOST_MEMORY = 0x2;
 constexpr CK_RV CKR_SLOT_ID_INVALID = 0x3;
 constexpr CK_RV CKR_GENERAL_ERROR = 0x5;
 constexpr CK_RV CKR_FUNCTION_FAILED = 0x6;
+constexpr CK_RV CKR_FUNCTION_NOT_SUPPORTED = 0x54;
 constexpr CK_RV CKR_ARGUMENTS_BAD = 0x7;
+constexpr CK_RV CKR_ATTRIBUTE_TYPE_INVALID = 0x12;
 constexpr CK_RV CKR_DATA_INVALID = 0x20;
 constexpr CK_RV CKR_MECHANISM_INVALID = 0x70;
 constexpr CK_RV CKR_KEY_HANDLE_INVALID = 0x60;
@@ -51,6 +57,7 @@ constexpr CK_RV CKR_TOKEN_NOT_PRESENT = 0xE0;
 constexpr CK_RV CKR_TOKEN_NOT_RECOGNIZED = 0xE1;
 constexpr CK_RV CKR_USER_NOT_LOGGED_IN = 0x101;
 constexpr CK_RV CKR_BUFFER_TOO_SMALL = 0x150;
+constexpr CK_RV CKR_CRYPTOKI_ALREADY_INITIALIZED = 0x191;
 
 constexpr CK_BBOOL CK_TRUE = 1;
 constexpr CK_BBOOL CK_FALSE = 0;
@@ -76,21 +83,60 @@ constexpr CK_FLAGS CKF_LOGIN_REQUIRED = 0x8;
 
 constexpr CK_ULONG CK_UNAVAILABLE_INFORMATION = 0xFFFFFFFF;
 
-struct CK_SLOT_INFO_MIN
+struct CK_VERSION
+{
+    CK_BYTE major;
+    CK_BYTE minor;
+};
+
+// Full CK_SLOT_INFO. The module writes the whole struct, so the buffer must
+// have the exact PKCS#11 layout (the previous truncated version overflowed by
+// the two CK_VERSION fields).
+struct CK_SLOT_INFO
 {
     CK_UTF8CHAR slotDescription[64];
     CK_UTF8CHAR manufacturerID[32];
     CK_FLAGS flags;
+    CK_VERSION hardwareVersion;
+    CK_VERSION firmwareVersion;
 };
 
-struct CK_TOKEN_INFO_MIN
+// Full CK_TOKEN_INFO. `serialNumber` is a 16-byte string, not an array of
+// CK_ULONG; the module writes every field, including the trailing versions and
+// utcTime. Truncating this struct corrupted the stack on Windows when a card
+// was present (C_GetTokenInfo is only reached for token-present slots).
+struct CK_TOKEN_INFO
 {
     CK_UTF8CHAR label[32];
     CK_UTF8CHAR manufacturerID[32];
     CK_UTF8CHAR model[16];
-    CK_ULONG serialNumber[16];
+    CK_CHAR serialNumber[16];
     CK_FLAGS flags;
+    CK_ULONG ulMaxSessionCount;
+    CK_ULONG ulSessionCount;
+    CK_ULONG ulMaxRwSessionCount;
+    CK_ULONG ulRwSessionCount;
+    CK_ULONG ulMaxPinLen;
+    CK_ULONG ulMinPinLen;
+    CK_ULONG ulTotalPublicMemory;
+    CK_ULONG ulFreePublicMemory;
+    CK_ULONG ulTotalPrivateMemory;
+    CK_ULONG ulFreePrivateMemory;
+    CK_VERSION hardwareVersion;
+    CK_VERSION firmwareVersion;
+    CK_CHAR utcTime[16];
 };
+
+// The module writes these complete structures. Pin their ABI size so a future
+// "minimal struct" edit cannot silently overflow the stack again (this was the
+// Windows crash when a card was present).
+#if defined(_WIN32) || (defined(__SIZEOF_LONG__) && __SIZEOF_LONG__ == 4)
+static_assert(sizeof(CK_SLOT_INFO) == 104, "CK_SLOT_INFO ABI size");
+static_assert(sizeof(CK_TOKEN_INFO) == 160, "CK_TOKEN_INFO ABI size");
+#else
+static_assert(sizeof(CK_SLOT_INFO) == 112, "CK_SLOT_INFO ABI size");
+static_assert(sizeof(CK_TOKEN_INFO) == 208, "CK_TOKEN_INFO ABI size");
+#endif
 
 struct CK_ATTRIBUTE
 {
@@ -108,11 +154,40 @@ struct CK_MECHANISM
 };
 using CK_MECHANISM_PTR = CK_MECHANISM *;
 
+// Bit4id's Windows x64 PKCS#11 module was built with 4-byte struct packing
+// (the Lua card-profile bridge indexes CK_ATTRIBUTE arrays with a 0x10 stride
+// and reads pValue at +4 / ulValueLen at +12). A native 24-byte CK_ATTRIBUTE
+// makes the module read padding and pointer halves as a value pointer/length,
+// which crashes inside its Lua hash tables. These packed mirrors are used only
+// for that module on Windows.
+#pragma pack(push, 4)
+struct CK_ATTRIBUTE_PACKED
+{
+    CK_ATTRIBUTE_TYPE type;
+    CK_VOID_PTR pValue;
+    CK_ULONG ulValueLen;
+};
+struct CK_MECHANISM_PACKED
+{
+    CK_MECHANISM_TYPE mechanism;
+    CK_VOID_PTR pParameter;
+    CK_ULONG ulParameterLen;
+};
+#pragma pack(pop)
+
+#if defined(_WIN32) || (defined(__SIZEOF_LONG__) && __SIZEOF_LONG__ == 4)
+static_assert(sizeof(CK_ATTRIBUTE_PACKED) == 16, "Bit4id packed CK_ATTRIBUTE");
+static_assert(offsetof(CK_ATTRIBUTE_PACKED, pValue) == 4, "Bit4id packed CK_ATTRIBUTE.pValue");
+static_assert(offsetof(CK_ATTRIBUTE_PACKED, ulValueLen) == 12,
+              "Bit4id packed CK_ATTRIBUTE.ulValueLen");
+static_assert(sizeof(CK_MECHANISM_PACKED) == 16, "Bit4id packed CK_MECHANISM");
+#endif
+
 using C_Initialize_t = CK_RV (*)(CK_VOID_PTR);
 using C_Finalize_t = CK_RV (*)(CK_VOID_PTR);
 using C_GetSlotList_t = CK_RV (*)(CK_BBOOL, CK_SLOT_ID_PTR, CK_ULONG_PTR);
-using C_GetSlotInfo_t = CK_RV (*)(CK_SLOT_ID, CK_SLOT_INFO_MIN *);
-using C_GetTokenInfo_t = CK_RV (*)(CK_SLOT_ID, CK_TOKEN_INFO_MIN *);
+using C_GetSlotInfo_t = CK_RV (*)(CK_SLOT_ID, CK_SLOT_INFO *);
+using C_GetTokenInfo_t = CK_RV (*)(CK_SLOT_ID, CK_TOKEN_INFO *);
 using C_OpenSession_t = CK_RV (*)(CK_SLOT_ID, CK_FLAGS, CK_VOID_PTR, CK_NOTIFY,
                                   CK_SESSION_HANDLE_PTR);
 using C_CloseSession_t = CK_RV (*)(CK_SESSION_HANDLE);
@@ -130,6 +205,7 @@ using C_Sign_t = CK_RV (*)(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR
 struct FnTable
 {
     void *handle = nullptr;
+    bool packedAbi = false; // Bit4id Windows x64 uses packed 16-byte structs
     C_Initialize_t C_Initialize = nullptr;
     C_Finalize_t C_Finalize = nullptr;
     C_GetSlotList_t C_GetSlotList = nullptr;
@@ -168,6 +244,7 @@ inline const char *rvName(CK_RV rv)
     case CKR_TOKEN_NOT_RECOGNIZED: return "CKR_TOKEN_NOT_RECOGNIZED";
     case CKR_USER_NOT_LOGGED_IN: return "CKR_USER_NOT_LOGGED_IN";
     case CKR_BUFFER_TOO_SMALL: return "CKR_BUFFER_TOO_SMALL";
+    case CKR_CRYPTOKI_ALREADY_INITIALIZED: return "CKR_CRYPTOKI_ALREADY_INITIALIZED";
     case CKR_PIN_INCORRECT: return "CKR_PIN_INCORRECT";
     case CKR_PIN_INVALID: return "CKR_PIN_INVALID";
     default:
@@ -179,6 +256,33 @@ inline const char *rvName(CK_RV rv)
 inline bool getAttr(FnTable &t, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE obj,
              CK_ATTRIBUTE_TYPE type, std::vector<unsigned char> &out)
 {
+    if (t.packedAbi) {
+        CK_ATTRIBUTE_PACKED attr{ type, nullptr, 0 };
+        CK_RV rv = t.C_GetAttributeValue(session, obj,
+                                         reinterpret_cast<CK_ATTRIBUTE *>(&attr), 1);
+        CK_ULONG len = attr.ulValueLen;
+        if (rv == CKR_OK || rv == CKR_BUFFER_TOO_SMALL) {
+            if (len == CK_UNAVAILABLE_INFORMATION)
+                return false;
+            out.resize(len);
+            attr.pValue = out.empty() ? nullptr : out.data();
+            attr.ulValueLen = len;
+            rv = t.C_GetAttributeValue(session, obj,
+                                       reinterpret_cast<CK_ATTRIBUTE *>(&attr), 1);
+            if (rv == CKR_OK) {
+                out.resize(attr.ulValueLen);
+                return true;
+            }
+            if (rv == CKR_BUFFER_TOO_SMALL) {
+                out.resize(attr.ulValueLen);
+                attr.pValue = out.empty() ? nullptr : out.data();
+                return t.C_GetAttributeValue(session, obj,
+                                             reinterpret_cast<CK_ATTRIBUTE *>(&attr),
+                                             1) == CKR_OK;
+            }
+        }
+        return false;
+    }
     CK_ATTRIBUTE attr{ type, nullptr, 0 };
     CK_RV rv = t.C_GetAttributeValue(session, obj, &attr, 1);
     CK_ULONG len = attr.ulValueLen;

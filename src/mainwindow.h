@@ -16,7 +16,7 @@ class QCheckBox;
 class QLabel;
 class QPushButton;
 class QScrollArea;
-class QPlainTextEdit;
+class QTextEdit;
 class QThread;
 class QTimer;
 class QProgressDialog;
@@ -40,6 +40,11 @@ public:
     // Switch to the verification tab, load `path` and run the verification.
     // Used when a signed .pdf / .p7m file is opened via the file association.
     void openFileForVerify(const QString &path);
+
+    // Open the PAdES or P7M signing tab with `path` preloaded. Used by the
+    // Explorer context-menu actions ("Firma PDF", "Firma PAdES", "Firma P7M").
+    void openFileForSignPades(const QString &path);
+    void openFileForSignP7m(const QString &path);
 
     // Plain text of the last verification report (empty before the first run).
     QString verifyReportText() const;
@@ -90,11 +95,18 @@ private:
                           const std::string &err);
     fdo::Pkcs11Slot selectedSlot(QComboBox *box,
                                  const std::vector<fdo::Pkcs11Slot> &store) const;
+    void updateCertInfo(QComboBox *box, const std::vector<fdo::Pkcs11Slot> &store,
+                        QLabel *label);
+    bool confirmSlotWarnings(const fdo::Pkcs11Slot &slot);
     QString defaultP11Lib() const;
     void loadFileInput(const QString &path);
     void loadVerifyFile(const QString &path);
     void showProgress(const QString &text);
     void hideProgress();
+
+    // Visual style of the verification status chip.
+    enum class VerifyStatus { Info, Busy, Ok, Warning, Error };
+    void setVerifyStatus(const QString &text, VerifyStatus status);
 
     // TSL resolution / freshness handling for the verify tab.
     QString cachedTslPath() const;
@@ -109,6 +121,7 @@ private:
     QLineEdit *m_pdfOutput = nullptr;
     QLineEdit *m_p11Lib = nullptr;
     QComboBox *m_p11Slot = nullptr;
+    QLabel *m_p11CertInfo = nullptr;
     QLineEdit *m_p11Pin = nullptr;
     QCheckBox *m_visible = nullptr;
     QLineEdit *m_visibleText = nullptr;
@@ -124,6 +137,7 @@ private:
     QLineEdit *m_fileOutput = nullptr;
     QLineEdit *m_p7mLib = nullptr;
     QComboBox *m_p7mSlot = nullptr;
+    QLabel *m_p7mCertInfo = nullptr;
     QLineEdit *m_p7mPin = nullptr;
     QPushButton *m_signFile = nullptr;
     QLabel *m_fileStatus = nullptr;
@@ -134,7 +148,7 @@ private:
     QPushButton *m_tslRefreshBtn = nullptr;
     QPushButton *m_verifyBtn = nullptr;
     QPushButton *m_saveOriginalBtn = nullptr;
-    QPlainTextEdit *m_verifyReport = nullptr;
+    QTextEdit *m_verifyReport = nullptr;
     QLabel *m_verifyStatus = nullptr;
     std::vector<unsigned char> m_verifyContent; // embedded content of last OK verify
     bool m_verifyContentReady = false;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ctime>
 #include <memory>
 #include <optional>
 #include <string>
@@ -17,12 +18,17 @@ struct Pkcs11Slot
     bool tokenPresent = false;
     bool loginRequired = false;
 
-    // Best-effort info from the first certificate on the token.
+    // Best-effort info from the newest/most suitable certificate on the token.
     bool hasCert = false;
     std::string certSubject;
     std::string certGivenName;
     std::string certSurname;
     std::string certSerialHex;
+    std::string certKeyId;      // CKA_ID of the certificate, display form
+    bool certKeyIdIsDs = false; // CKA_ID is DS<digit>
+    std::string certNotAfter;   // "YYYY-MM-DD HH:MM:SS UTC"
+    std::time_t certNotAfterEpoch = 0;
+    bool certExpired = false;
 };
 
 // Thin wrapper around a PKCS#11 module (Bit4id token in the original app).
@@ -36,6 +42,8 @@ public:
         std::vector<unsigned char> certDer;
         std::string keyLabel;
         std::string keyId;
+        std::string certNotAfter;
+        bool certExpired = false;
     };
 
     ~Pkcs11();

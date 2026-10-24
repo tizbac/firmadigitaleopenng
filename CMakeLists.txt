@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(FirmaDigitaleOpenCpp VERSION 1.0.0 LANGUAGES CXX)
+project(FirmaDigitaleOpenCpp VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -175,6 +175,16 @@ if (WIN32)
         message(WARNING "Nessun libbit4xpki.dll/bit4xpki.dll accanto al repository: "
                         "l'installer usera il modulo Bit4id gia installato nel sistema")
     endif()
+
+    # x86-64 companion modules shipped in the Bit4id Universal MW kit. The
+    # generic bit4xpki.dll loads them (card-specific Oberthur/Incard/NXP PKCS#11
+    # backends and the extension plugin) from the application directory. They
+    # must be the 64-bit variants, otherwise token detection can crash.
+    foreach(_dll bit4opki.dll bit4ipki.dll bit4npki.dll bit4extplg.dll)
+        if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_dll}")
+            install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/${_dll}" DESTINATION .)
+        endif()
+    endforeach()
 else()
 install(TARGETS firmadigitaleopen RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 

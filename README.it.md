@@ -21,6 +21,20 @@ di fiducia **TSL** (Trusted Lists / liste di fiducia italiane ed europee).
 Il nucleo crittografico (`fdo_core`) non ha dipendenze Qt ed è completamente
 testato; la GUI Qt si appoggia su di esso.
 
+## Versione Windows
+
+Una versione **Windows x64** autoconsistente è disponibile nella pagina
+[Releases](https://github.com/tizbac/firmadigitaleopenng/releases) come
+`firmadigitaleopen-<version>-win64-setup.exe`. Include Qt 6, Poppler,
+OpenSSL, libxml2 e il modulo PKCS#11 Bit4id: non serve installare Qt o altri
+runtime separati.
+
+- Associazione dei file `.p7m` (il `.pdf` mantiene il lettore predefinito)
+- Voci del menu contestuale di Esplora file: **Firma PDF** sui PDF,
+  **Firma PAdES** e **Firma P7M** su qualsiasi tipo di file
+- Identità `DS3`, `DS4`, `DS5`… dei token rinnovati, con scadenza del
+  certificato e avvisi per certificati non DSx o scaduti
+
 ## Funzionalità
 
 - **PAdES-BES** firma digitale di PDF (ByteRange + CMS signed-data, attributi
@@ -43,7 +57,9 @@ verificatore del core rifiuta inoltre un insieme di ancore vuoto prima di
 validare la catena, quindi non esiste alcun fallback auto-fidato.
 - **PKCS#11** strato per token: wrapper `dlopen`/`LoadLibraryW` minimale (senza
   header PKCS#11 di sistema) che enumera gli slot, esegue il login, trova la
-  chiave/certificato del firmatario tramite `CKA_ID "DS3"` e firma.
+  chiave/certificato del firmatario tramite `CKA_ID` `DS3`/`DS4`/`DS5`...
+  (token rinnovati) e firma. La GUI mostra `CKA_ID` e scadenza del certificato
+  e avvisa prima di firmare con un certificato non DSx o scaduto.
 - Helper per XML canonico (C14N).
 
 ## Dipendenze
@@ -100,9 +116,12 @@ Cosa fanno gli stage Docker:
   `packaging/windows/installer.nsi`.
 
 L'installer installa in `%ProgramFiles%\FirmaDigitaleOpen`, crea i collegamenti
-nel menu Start e sul desktop, registra `.pdf` in *Apri con* e associa `.p7m`
-quando non ha già un proprietario, e include il disinstallatore. L'eseguibile è
-una GUI (`-mwindows`) con icona e risorsa VERSIONINFO.
+nel menu Start e sul desktop e include il disinstallatore. Associa **solo
+`.p7m`** (quando non ha già un proprietario) e aggiunge le voci del menu
+contestuale di Esplora file: **Firma PDF** sui `.pdf`, più **Firma PAdES** e
+**Firma P7M** su ogni tipo di file. Il `.pdf` mantiene il lettore predefinito
+dell'utente. L'eseguibile è una GUI (`-mwindows`) con icona e risorsa
+VERSIONINFO.
 
 Il modulo PKCS#11 Bit4id è incluso: `bit4xpki.dll` è il modulo ufficiale
 **x86-64** di Bit4id estratto dal kit Universal Middleware (versione modulo

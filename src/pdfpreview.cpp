@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <exception>
 
 #include <poppler/qt6/poppler-qt6.h>
 
@@ -36,17 +37,32 @@ QSizeF PdfPreview::pageSize() const
 
 bool PdfPreview::loadPdf(const QString &path, int page, QString *error)
 {
-    m_doc = Poppler::Document::load(path);
-    if (!m_doc || m_doc->numPages() == 0) {
+    try {
+        m_doc = Poppler::Document::load(path);
+        if (!m_doc || m_doc->numPages() == 0) {
+            m_doc.reset();
+            if (error)
+                *error = tr("Impossibile aprire il PDF: %1").arg(path);
+            return false;
+        }
+        const int n = m_doc->numPages();
+        m_page = qBound(0, page, n - 1);
+        renderPage();
+        return true;
+    } catch (const std::exception &e) {
         m_doc.reset();
+        m_image = QImage();
         if (error)
-            *error = tr("Impossibile aprire il PDF: %1").arg(path);
+            *error = tr("Impossibile visualizzare il PDF: %1")
+                         .arg(QString::fromUtf8(e.what()));
+        return false;
+    } catch (...) {
+        m_doc.reset();
+        m_image = QImage();
+        if (error)
+            *error = tr("Impossibile visualizzare il PDF: %1").arg(path);
         return false;
     }
-    const int n = m_doc->numPages();
-    m_page = qBound(0, page, n - 1);
-    renderPage();
-    return true;
 }
 
 void PdfPreview::setPage(int i)
@@ -78,24 +94,32 @@ void PdfPreview::renderPage()
 {
     if (!m_doc)
         return;
-    auto page = m_doc->page(m_page);
-    if (!page)
-        return;
+    try {
+        auto page = m_doc->page(m_page);
+        if (!page)
+            return;
 
-    const QSizeF sz = page->pageSizeF();
-    m_pageW = sz.width();
-    m_pageH = sz.height();
+        const QSizeF sz = page->pageSizeF();
+        m_pageW = sz.width();
+        m_pageH = sz.height();
 
-    // Fit the page to a width that fits the preview pane (the pane is capped
-    // at ~700 px); taller pages scroll vertically. This keeps the main window
-    // from growing when a PDF is loaded.
-    constexpr double kMaxWidth = 660.0;
-    double zoom = kMaxWidth / (m_pageW > 0 ? m_pageW : 1.0);
-    m_zoom = qBound(0.6, zoom, 2.5);
+        // Fit the page to a width that fits the preview pane (the pane is capped
+        // at ~700 px); taller pages scroll vertically. This keeps the main window
+        // from growing when a PDF is loaded.
+        constexpr double kMaxWidth = 660.0;
+        double zoom = kMaxWidth / (m_pageW > 0 ? m_pageW : 1.0);
+        m_zoom = qBound(0.6, zoom, 2.5);
 
-    m_image = page->renderToImage(72.0 * m_zoom, 72.0 * m_zoom);
-    setFixedSize(m_image.size());
-    update();
+        m_image = page->renderToImage(72.0 * m_zoom, 72.0 * m_zoom);
+        setFixedSize(m_image.size());
+        update();
+    } catch (const std::exception &) {
+        m_image = QImage();
+        update();
+    } catch (...) {
+        m_image = QImage();
+        update();
+    }
 }
 
 QPointF PdfPreview::pdfToScreen(double px, double py) const

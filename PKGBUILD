@@ -11,7 +11,7 @@
 #     repo's Dockerfile (--target test) for a full build+test instead.
 
 pkgname=firmadigitaleopen
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Firma digitale PAdES (PDF) e P7M con token PKCS#11"
 arch=('x86_64')

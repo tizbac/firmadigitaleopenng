@@ -13,14 +13,40 @@ int main(int argc, char *argv[])
     MainWindow w;
     w.show();
 
-    // A file passed on the command line (e.g. from the .pdf/.p7m file
-    // association) is opened in the verification tab and verified immediately.
+    // Command-line contract used by the Explorer integration:
+    //   (no flag) file.pdf / file.p7m  -> verification tab (+ auto verify)
+    //   --sign-pades <file.pdf>        -> PAdES tab, input preloaded
+    //   --sign-p7m   <any file>        -> P7M tab, input preloaded
+    //   --verify     <file>            -> verification tab
+    enum class StartAction { Verify, SignPades, SignP7m };
+    StartAction action = StartAction::Verify;
+    QString path;
+
     const QStringList args = app.arguments();
     for (int i = 1; i < args.size(); ++i) {
-        const QString path = args.at(i);
-        if (path.startsWith('-'))
-            continue;
-        if (QFileInfo::exists(path)) {
+        const QString arg = args.at(i);
+        if (arg == QLatin1String("--sign-pades")) {
+            action = StartAction::SignPades;
+        } else if (arg == QLatin1String("--sign-p7m")) {
+            action = StartAction::SignP7m;
+        } else if (arg == QLatin1String("--verify")) {
+            action = StartAction::Verify;
+        } else if (!arg.startsWith('-') && QFileInfo::exists(arg)) {
+            path = arg;
+            break;
+        }
+    }
+
+    if (!path.isEmpty()) {
+        switch (action) {
+        case StartAction::SignPades:
+            w.openFileForSignPades(path);
+            break;
+        case StartAction::SignP7m:
+            w.openFileForSignP7m(path);
+            break;
+        case StartAction::Verify:
+        default:
             w.openFileForVerify(path);
             break;
         }

@@ -37,7 +37,6 @@ Unicode true
 
 !define REG_APP        "Software\FirmaDigitaleOpen"
 !define REG_UNINSTALL  "Software\Microsoft\Windows\CurrentVersion\Uninstall\FirmaDigitaleOpen"
-!define PROGID_PDF     "FirmaDigitaleOpen.pdf"
 !define PROGID_P7M     "FirmaDigitaleOpen.p7m"
 
 Name "${APP_NAME} ${APP_VERSION}"
@@ -83,24 +82,35 @@ LangString SEC_STARTMENU    ${LANG_ITALIAN} "Voce nel menu Start"
 LangString SEC_STARTMENU    ${LANG_ENGLISH} "Start Menu shortcut"
 LangString SEC_DESKTOP      ${LANG_ITALIAN} "Icona sul desktop"
 LangString SEC_DESKTOP      ${LANG_ENGLISH} "Desktop shortcut"
-LangString SEC_ASSOC        ${LANG_ITALIAN} "Associazione file .pdf e .p7m"
-LangString SEC_ASSOC        ${LANG_ENGLISH} ".pdf and .p7m file association"
+LangString SEC_ASSOC        ${LANG_ITALIAN} "Associazione .p7m e menu contestuale"
+LangString SEC_ASSOC        ${LANG_ENGLISH} ".p7m association and context menu"
 LangString SEC_UNINSTALL    ${LANG_ITALIAN} "Disinstallazione"
 LangString SEC_UNINSTALL    ${LANG_ENGLISH} "Uninstall"
 LangString MSG_X64          ${LANG_ITALIAN} "${APP_NAME} richiede Windows a 64 bit."
 LangString MSG_X64          ${LANG_ENGLISH} "${APP_NAME} requires 64-bit Windows."
-LangString DESC_PDF         ${LANG_ITALIAN} "Documento PDF"
-LangString DESC_PDF         ${LANG_ENGLISH} "PDF document"
 LangString DESC_P7M         ${LANG_ITALIAN} "Documento firmato P7M (CMS)"
 LangString DESC_P7M         ${LANG_ENGLISH} "P7M signed document (CMS)"
+LangString CTX_SIGN_PDF     ${LANG_ITALIAN} "Firma PDF"
+LangString CTX_SIGN_PDF     ${LANG_ENGLISH} "Sign PDF"
+LangString CTX_SIGN_PADES   ${LANG_ITALIAN} "Firma PAdES"
+LangString CTX_SIGN_PADES   ${LANG_ENGLISH} "Sign PAdES"
+LangString CTX_SIGN_P7M     ${LANG_ITALIAN} "Firma P7M"
+LangString CTX_SIGN_P7M     ${LANG_ENGLISH} "Sign P7M"
 
 !macro REGISTER_ASSOC EXT PROGID DESCRIPTION
-    ; ProgID + "Open with" entry. The .pdf default handler is deliberately
-    ; left untouched; .p7m is claimed only when it has no owner yet.
+    ; ProgID + "Open with" entry. Only .p7m is associated; .pdf is left to the
+    ; user's preferred reader and gets a context-menu action instead.
     WriteRegStr HKLM "Software\Classes\${PROGID}" "" "${DESCRIPTION}"
     WriteRegStr HKLM "Software\Classes\${PROGID}\DefaultIcon" "" "$INSTDIR\${APP_EXE},0"
     WriteRegStr HKLM "Software\Classes\${PROGID}\shell\open\command" "" '"$INSTDIR\${APP_EXE}" "%1"'
     WriteRegStr HKLM "Software\Classes\${EXT}\OpenWithProgids" "${PROGID}" ""
+!macroend
+
+!macro REGISTER_CONTEXT_MENU KEY LABEL ARGS
+    WriteRegStr HKLM "${KEY}" "" "${LABEL}"
+    WriteRegStr HKLM "${KEY}" "Icon" "$INSTDIR\${APP_EXE},0"
+    WriteRegStr HKLM "${KEY}" "MultiSelectModel" "Single"
+    WriteRegStr HKLM "${KEY}\command" "" '"$INSTDIR\${APP_EXE}" ${ARGS} "%1"'
 !macroend
 
 Function .onInit
@@ -158,13 +168,24 @@ SectionEnd
 
 Section "$(SEC_ASSOC)" SEC_ASSOC
     SetRegView 64
-    !insertmacro REGISTER_ASSOC ".pdf" "${PROGID_PDF}" "$(DESC_PDF)"
+    ; Upgrade cleanup: older installers registered a .pdf OpenWith entry.
+    ; .pdf must now keep the user's default reader.
+    DeleteRegValue HKLM "Software\Classes\.pdf\OpenWithProgids" "FirmaDigitaleOpen.pdf"
+    DeleteRegKey HKLM "Software\Classes\FirmaDigitaleOpen.pdf"
+
+    ; File association: .p7m only (never steal the .pdf default handler).
     !insertmacro REGISTER_ASSOC ".p7m" "${PROGID_P7M}" "$(DESC_P7M)"
 
     ReadRegStr $0 HKLM "Software\Classes\.p7m" ""
     ${If} $0 == ""
         WriteRegStr HKLM "Software\Classes\.p7m" "" "${PROGID_P7M}"
     ${EndIf}
+
+    ; Explorer context menus. "Firma PDF" is .pdf-specific; PAdES/P7M signing
+    ; is offered for every file type (PAdES validates that the input is a PDF).
+    !insertmacro REGISTER_CONTEXT_MENU "Software\Classes\SystemFileAssociations\.pdf\shell\FirmaDigitaleOpenSignPdf" "$(CTX_SIGN_PDF)" "--sign-pades"
+    !insertmacro REGISTER_CONTEXT_MENU "Software\Classes\*\shell\FirmaDigitaleOpenSignPades" "$(CTX_SIGN_PADES)" "--sign-pades"
+    !insertmacro REGISTER_CONTEXT_MENU "Software\Classes\*\shell\FirmaDigitaleOpenSignP7m" "$(CTX_SIGN_P7M)" "--sign-p7m"
 SectionEnd
 
 LangString DESC_SEC_APP       ${LANG_ITALIAN} "Eseguibile, DLL Qt/OpenSSL/poppler/MinGW e modulo PKCS#11 Bit4id."
@@ -173,8 +194,8 @@ LangString DESC_SEC_STARTMENU ${LANG_ITALIAN} "Aggiunge ${APP_NAME} al menu Star
 LangString DESC_SEC_STARTMENU ${LANG_ENGLISH} "Adds ${APP_NAME} to the Start Menu."
 LangString DESC_SEC_DESKTOP   ${LANG_ITALIAN} "Crea un collegamento sul desktop."
 LangString DESC_SEC_DESKTOP   ${LANG_ENGLISH} "Creates a desktop shortcut."
-LangString DESC_SEC_ASSOC     ${LANG_ITALIAN} "Apre i PDF in verifica e i P7M con ${APP_NAME}."
-LangString DESC_SEC_ASSOC     ${LANG_ENGLISH} "Opens PDFs for verification and P7M files with ${APP_NAME}."
+LangString DESC_SEC_ASSOC     ${LANG_ITALIAN} "Associa i .p7m e aggiunge Firma PDF / PAdES / P7M al menu contestuale di Esplora file."
+LangString DESC_SEC_ASSOC     ${LANG_ENGLISH} "Associates .p7m and adds Sign PDF / PAdES / P7M to the Explorer context menu."
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
     !insertmacro MUI_DESCRIPTION_TEXT ${SEC_APP}       "$(DESC_SEC_APP)"
@@ -191,10 +212,16 @@ Section "Uninstall"
     ${If} $0 == "${PROGID_P7M}"
         DeleteRegValue HKLM "Software\Classes\.p7m" ""
     ${EndIf}
-    DeleteRegValue HKLM "Software\Classes\.pdf\OpenWithProgids" "${PROGID_PDF}"
+    ; Remove old .pdf association from previous versions (upgrade cleanup).
+    DeleteRegValue HKLM "Software\Classes\.pdf\OpenWithProgids" "FirmaDigitaleOpen.pdf"
+    DeleteRegKey HKLM "Software\Classes\FirmaDigitaleOpen.pdf"
     DeleteRegValue HKLM "Software\Classes\.p7m\OpenWithProgids" "${PROGID_P7M}"
-    DeleteRegKey HKLM "Software\Classes\${PROGID_PDF}"
     DeleteRegKey HKLM "Software\Classes\${PROGID_P7M}"
+
+    ; Explorer context-menu actions.
+    DeleteRegKey HKLM "Software\Classes\SystemFileAssociations\.pdf\shell\FirmaDigitaleOpenSignPdf"
+    DeleteRegKey HKLM "Software\Classes\*\shell\FirmaDigitaleOpenSignPades"
+    DeleteRegKey HKLM "Software\Classes\*\shell\FirmaDigitaleOpenSignP7m"
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\App Paths\${APP_EXE}"
     DeleteRegKey HKLM "${REG_APP}"
     DeleteRegKey HKLM "${REG_UNINSTALL}"
