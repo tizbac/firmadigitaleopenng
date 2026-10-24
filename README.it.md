@@ -35,6 +35,16 @@ runtime separati.
 - Identità `DS3`, `DS4`, `DS5`… dei token rinnovati, con scadenza del
   certificato e avvisi per certificati non DSx o scaduti
 
+## Integrazione desktop Linux (KDE / Dolphin)
+
+I pacchetti Debian/RPM installano i menu contestuali di Dolphin:
+
+- **Firma PDF** sui file `.pdf`
+- **Firma PAdES** e **Firma P7M** su qualsiasi tipo di file
+
+Solo il `.p7m` viene associato all'applicazione; il `.pdf` mantiene il lettore
+predefinito del desktop. L'integrazione con GNOME/Nautilus non è ancora inclusa.
+
 ## Funzionalità
 
 - **PAdES-BES** firma digitale di PDF (ByteRange + CMS signed-data, attributi

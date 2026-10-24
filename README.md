@@ -31,6 +31,16 @@ installation is required.
 - Renewed-token identities `DS3`, `DS4`, `DS5`… with certificate expiry shown
   and warnings for non-DSx or expired certificates
 
+## Linux desktop integration (KDE / Dolphin)
+
+The Debian/RPM packages install Dolphin service menus:
+
+- **Firma PDF** on `.pdf` files
+- **Firma PAdES** and **Firma P7M** on any file type
+
+Only `.p7m` is associated with the application; `.pdf` keeps the desktop's
+default reader. GNOME/Nautilus integration is not included yet.
+
 ## Features
 
 - **PAdES-BES** PDF signing (ByteRange + CMS signed-data, RFC 3161-style

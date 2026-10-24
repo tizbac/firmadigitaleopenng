@@ -9,5 +9,5 @@ Icon=firmadigitaleopen
 Terminal=false
 Categories=Office;Security;Qt;
 Keywords=crypto;security;signature;PAdES;P7M;digital;
-MimeType=application/pdf;application/pkcs7-mime;application/x-pkcs7-mime;application/pkcs7-signature;application/x-pkcs7-signature;
+MimeType=application/pkcs7-mime;application/x-pkcs7-mime;application/pkcs7-signature;application/x-pkcs7-signature;
 StartupNotify=true

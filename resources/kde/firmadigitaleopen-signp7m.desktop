@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Service
+Name=FirmaDigitaleOpen
+MimeType=all/allfiles;
+Actions=FirmaP7M;
+X-KDE-Priority=TopLevel
+X-KDE-Protocols=file
+Icon=firmadigitaleopen
+
+[Desktop Action FirmaP7M]
+Name=Firma P7M
+Name[it]=Firma P7M
+Icon=firmadigitaleopen
+Exec=firmadigitaleopen --sign-p7m %f

@@ -213,6 +213,14 @@ install(FILES resources/firmadigitaleopen.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES resources/firmadigitaleopen.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+
+# KDE/Dolphin service menus (Plasma 6 path). The actions invoke the same
+# --sign-pades/--sign-p7m commands used by the Windows Explorer integration.
+install(FILES
+        resources/kde/firmadigitaleopen-signpdf.desktop
+        resources/kde/firmadigitaleopen-signpades.desktop
+        resources/kde/firmadigitaleopen-signp7m.desktop
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/kio/servicemenus)
 endif() # WIN32
 
 # ------------------------------------------------------------------- CPack --#

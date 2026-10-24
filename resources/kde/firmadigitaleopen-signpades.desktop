@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Service
+Name=FirmaDigitaleOpen
+MimeType=all/allfiles;
+Actions=FirmaPAdES;
+X-KDE-Priority=TopLevel
+X-KDE-Protocols=file
+Icon=firmadigitaleopen
+
+[Desktop Action FirmaPAdES]
+Name=Firma PAdES
+Name[it]=Firma PAdES
+Icon=firmadigitaleopen
+Exec=firmadigitaleopen --sign-pades %f
